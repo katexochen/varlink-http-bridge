@@ -225,13 +225,11 @@ Explicit CLI flags take priority over credentials directory files.
 
 The `varlinkctl-http` binary acts as a bridge between `varlinkctl`
 and `varlink-httpd`, supporting TLS and mTLS. It looks for
-client credentials in the first existing directory:
+client TLS material in the first existing directory:
 
 * `$XDG_CONFIG_HOME/varlinkctl-http/`
 * `~/.config/varlinkctl-http/`
-* `$CREDENTIALS_DIRECTORY`
-
-The credential file names are:
+* `/etc/varlinkctl-http/`
 
 | File                   | Purpose                                   |
 |------------------------|-------------------------------------------|
