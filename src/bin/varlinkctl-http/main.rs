@@ -70,25 +70,22 @@ fn ws_tcp_stream(ws: &Ws) -> &TcpStream {
 
 /// Build an `SslConnector` with client certs and a custom CA loaded from the
 /// first existing directory:
-/// 1. `$XDG_CONFIG_HOME/varlink-httpd/`
-/// 2. `~/.config/varlink-httpd/`
-/// 3. `$CREDENTIALS_DIRECTORY` (systemd, see systemd.exec(5))
+/// 1. `$XDG_CONFIG_HOME/varlinkctl-http/`
+/// 2. `~/.config/varlinkctl-http/`
+/// 3. `/etc/varlinkctl-http/`
 fn build_ssl_connector() -> Result<SslConnector> {
     let mut builder = SslConnector::builder(SslMethod::tls_client())?;
     // We need tls channel binding per RFC 9266 ("tls-exporter") which
     // is only guaranteed unique with TLS 1.3.
     builder.set_min_proto_version(Some(SslVersion::TLS1_3))?;
 
-    let maybe_credentials_dirs = [
-        std::env::var_os("XDG_CONFIG_HOME").map(|d| PathBuf::from(d).join("varlink-httpd")),
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/varlink-httpd")),
-        std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from),
+    let config_dirs = [
+        std::env::var_os("XDG_CONFIG_HOME").map(|d| PathBuf::from(d).join("varlinkctl-http")),
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/varlinkctl-http")),
+        Some(PathBuf::from("/etc/varlinkctl-http")),
     ];
-    if let Some(dir) = maybe_credentials_dirs
-        .into_iter()
-        .flatten()
-        .find(|d| d.is_dir())
-    {
+
+    if let Some(dir) = config_dirs.into_iter().flatten().find(|d| d.is_dir()) {
         let cert = dir.join("client-cert-file");
         let key = dir.join("client-key-file");
         let ca = dir.join("server-ca-file");

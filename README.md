@@ -225,13 +225,11 @@ Explicit CLI flags take priority over credentials directory files.
 
 The `varlinkctl-http` binary acts as a bridge between `varlinkctl`
 and `varlink-httpd`, supporting TLS and mTLS. It looks for
-client credentials in the first existing directory:
+client TLS material in the first existing directory:
 
-* `$XDG_CONFIG_HOME/varlink-httpd/`
-* `~/.config/varlink-httpd/`
-* `$CREDENTIALS_DIRECTORY`
-
-The credential file names are:
+* `$XDG_CONFIG_HOME/varlinkctl-http/`
+* `~/.config/varlinkctl-http/`
+* `/etc/varlinkctl-http/`
 
 | File                   | Purpose                                   |
 |------------------------|-------------------------------------------|
@@ -243,10 +241,10 @@ The system CAs are used automatically. For mTLS, drop the client cert
 and key into the config directory:
 
 ```console
-$ mkdir -p ~/.config/varlink-httpd
-$ cp client-cert.pem ~/.config/varlink-httpd/client-cert-file
-$ cp client-key.pem  ~/.config/varlink-httpd/client-key-file
-$ cp ca.pem          ~/.config/varlink-httpd/server-ca-file
+$ mkdir -p ~/.config/varlinkctl-http
+$ cp client-cert.pem ~/.config/varlinkctl-http/client-cert-file
+$ cp client-key.pem  ~/.config/varlinkctl-http/client-key-file
+$ cp ca.pem          ~/.config/varlinkctl-http/server-ca-file
 
 $ VARLINK_BRIDGE_URL=https://myhost:1031/ws/sockets/io.systemd.Hostname \
     varlinkctl call exec:/usr/libexec/varlinkctl-http \
