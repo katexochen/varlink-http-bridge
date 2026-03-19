@@ -19,5 +19,16 @@ ExecStart=@bindir@/varlink-httpd --bind 0.0.0.0:1031
 Restart=on-failure
 RestartSec=5
 
+# TLS credentials: well-known names from the credstore, renamed to the
+# short names the service expects in $CREDENTIALS_DIRECTORY.
+# Place certs in /etc/credstore/ and keys in /etc/credstore.encrypted/.
+ImportCredential=varlink-httpd.tls.certificate:cert
+ImportCredential=varlink-httpd.tls.key:key
+ImportCredential=varlink-httpd.tls.trust:trust
+
+# SSH authorized keys (see systemd.system-credentials(7))
+ImportCredential=ssh.authorized_keys.root
+ImportCredential=ssh.ephemeral-authorized_keys-all
+
 [Install]
 WantedBy=network.target

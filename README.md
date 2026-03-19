@@ -208,18 +208,21 @@ require clients to present a certificate signed by that CA.
 
 ### systemd credentials
 
-When running as a systemd service, the bridge automatically discovers
-TLS material from `$CREDENTIALS_DIRECTORY` (see `systemd.exec(5)`).
-The credential file names match the CLI flag names:
+When running as a systemd service, the bridge discovers TLS material
+from `$CREDENTIALS_DIRECTORY` (see `systemd.exec(5)`).  The credential
+file names match the CLI flag names: `cert`, `key`, `trust`.
 
-```ini
-[Service]
-LoadCredential=cert:/etc/ssl/certs/bridge.pem
-LoadCredential=key:/etc/ssl/private/bridge.pem
-LoadCredential=trust:/etc/ssl/ca/client-ca.pem
+The shipped unit file (`varlink-httpd.service`) uses `ImportCredential=`
+to import well-known credential names from the credstore and rename
+them to the short names the service expects.  To provision TLS:
+
+```console
+# cp server.pem     /etc/credstore/varlink-httpd.tls.certificate
+# systemd-creds encrypt server-key.pem /etc/credstore.encrypted/varlink-httpd.tls.key
+# cp ca.pem         /etc/credstore/varlink-httpd.tls.trust
 ```
 
-Explicit CLI flags take priority over credentials directory files.
+Explicit CLI flags take priority over credentials.
 
 ### Client (varlinkctl-http)
 
@@ -265,8 +268,7 @@ locations (first match wins):
 
 1. `--authorized-keys=PATH` — explicit CLI flag
 2. `/etc/varlink-httpd/authorized_keys` — config file
-3. `$CREDENTIALS_DIRECTORY/ssh.authorized_keys.root` — systemd per-service credential (see `systemd.exec(5)`)
-4. `/run/credentials/@system/ssh.authorized_keys.root` — system-wide credential (see `systemd.system-credentials(7)`)
+3. `$CREDENTIALS_DIRECTORY/ssh.authorized_keys.root` — systemd credential (see `systemd.exec(5)`)
 
 The simplest setup is to pass the path explicitly:
 
