@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 // Reduced-feature builds leave some shared auth plumbing unused; the
-// default build still gets full dead-code checking.
-#![cfg_attr(not(feature = "sshauth"), allow(dead_code))]
+// default all-features build still gets full dead-code checking.
+#![cfg_attr(not(all(feature = "sshauth", feature = "jwtauth")), allow(dead_code))]
 
 use anyhow::{Context, bail};
 use async_stream::stream;
@@ -34,6 +34,8 @@ use tokio_vsock::VsockListener;
 use varlink_http_bridge::TlsChannelBinding;
 use zlink::varlink_service::Proxy;
 
+#[cfg(feature = "jwtauth")]
+mod auth_jwt;
 #[cfg(feature = "sshauth")]
 mod auth_ssh;
 #[cfg(feature = "sshauth")]
@@ -44,8 +46,11 @@ mod ws_framing;
 
 use ws_framing::VarlinkFramer;
 
+#[cfg(feature = "jwtauth")]
+use auth_jwt::create_jwt_authenticator;
 #[cfg(feature = "sshauth")]
 use auth_ssh::create_ssh_authenticator;
+
 #[derive(Debug)]
 struct AppError {
     status: StatusCode,
@@ -514,6 +519,9 @@ enum AuthMechanism {
     /// Bearer token signed by an authorized SSH key.
     #[cfg(feature = "sshauth")]
     SshAuth,
+    /// Bearer JWT from a trusted issuer.
+    #[cfg(feature = "jwtauth")]
+    Jwt,
     /// No authentication at all, over plain HTTP.
     None,
 }
@@ -523,6 +531,8 @@ impl AuthMechanism {
         Self::Mtls,
         #[cfg(feature = "sshauth")]
         Self::SshAuth,
+        #[cfg(feature = "jwtauth")]
+        Self::Jwt,
         Self::None,
     ];
 
@@ -531,6 +541,8 @@ impl AuthMechanism {
             Self::Mtls => "mtls",
             #[cfg(feature = "sshauth")]
             Self::SshAuth => "sshauth",
+            #[cfg(feature = "jwtauth")]
+            Self::Jwt => "jwt",
             Self::None => "none",
         }
     }
@@ -557,6 +569,10 @@ impl AuthMechanism {
         #[cfg(not(feature = "sshauth"))]
         if name == "sshauth" {
             bail!("--auth=sshauth requires building with the 'sshauth' feature");
+        }
+        #[cfg(not(feature = "jwtauth"))]
+        if name == "jwt" {
+            bail!("--auth=jwt requires building with the 'jwtauth' feature");
         }
         bail!(
             "unknown --auth mechanism '{name}' (valid: {})",
@@ -1317,7 +1333,9 @@ async fn start_server(
 
 #[derive(Debug)]
 enum Command {
-    Bridge(BridgeCli),
+    // Boxed: BridgeCli is much larger than the other variants, so storing it
+    // inline would bloat every Command to its size (clippy::large_enum_variant).
+    Bridge(Box<BridgeCli>),
     #[cfg(feature = "sshauth")]
     ImportSsh(import_ssh::ImportSsh),
 }
@@ -1397,6 +1415,23 @@ impl std::str::FromStr for BindAddr {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct JwtCliOptions {
+    issuer: Option<String>,
+    audience: Option<String>,
+    issuer_jwks: Option<std::path::PathBuf>,
+    require_claims: Vec<String>,
+}
+
+impl JwtCliOptions {
+    fn any_option_set(&self) -> bool {
+        self.issuer.is_some()
+            || self.audience.is_some()
+            || self.issuer_jwks.is_some()
+            || !self.require_claims.is_empty()
+    }
+}
+
 #[derive(Debug)]
 struct BridgeCli {
     binds: Vec<BindAddr>,
@@ -1405,6 +1440,7 @@ struct BridgeCli {
     key: Option<String>,
     trust: Option<String>,
     authorized_keys: Option<String>,
+    jwt: JwtCliOptions,
     auth: Vec<AuthMechanism>,
 }
 
@@ -1417,6 +1453,15 @@ const HELP_IMPORT_SSH_USAGE: &str = if cfg!(feature = "sshauth") {
 };
 const HELP_IMPORT_SSH_CMD: &str = if cfg!(feature = "sshauth") {
     "\n  import-ssh SOURCE [OUTPUT]        download SSH authorized keys from a URL"
+} else {
+    ""
+};
+const HELP_JWT: &str = if cfg!(feature = "jwtauth") {
+    "\n  --issuer=URL                      JWT issuer (accepted 'iss')\
+     \n  --audience=ID                     accepted JWT 'aud' (default: hostname)\
+     \n  --issuer-jwks=PATH                issuer JWKS file (RS256/ES256 public keys)\
+     \n  --require-claim=NAME=VALUE        require claim NAME to match VALUE ('*' globs;\
+     \n                                    repeat for OR; distinct names AND), repeatable"
 } else {
     ""
 };
@@ -1447,7 +1492,7 @@ fn print_help() {
                                             (default: self-signed, generated
                                             and persisted on first start)
           --key=PATH                        TLS private key PEM file
-          --trust=PATH                      CA certificate PEM for client verification (mTLS){HELP_AUTHORIZED_KEYS}
+          --trust=PATH                      CA certificate PEM for client verification (mTLS){HELP_AUTHORIZED_KEYS}{HELP_JWT}
           --auth=LIST                       required; comma-separated mechanisms
                                             to enable: {auth}
                                             (none insecurely serves plain HTTP, DANGEROUS)
@@ -1483,6 +1528,7 @@ fn parse_cli() -> anyhow::Result<Command> {
     let mut key = None;
     let mut trust = None;
     let mut authorized_keys = None;
+    let mut jwt = JwtCliOptions::default();
     let mut auth = None;
     let mut got_positional = false;
 
@@ -1494,6 +1540,10 @@ fn parse_cli() -> anyhow::Result<Command> {
             Long("key") => key = Some(parser.value()?.parse()?),
             Long("trust") => trust = Some(parser.value()?.parse()?),
             Long("authorized-keys") => authorized_keys = Some(parser.value()?.parse()?),
+            Long("issuer") => jwt.issuer = Some(parser.value()?.parse()?),
+            Long("audience") => jwt.audience = Some(parser.value()?.parse()?),
+            Long("issuer-jwks") => jwt.issuer_jwks = Some(parser.value()?.into()),
+            Long("require-claim") => jwt.require_claims.push(parser.value()?.parse()?),
             Long("auth") => auth = Some(parse_auth(&parser.value()?.string()?)?),
             Long("help") => {
                 print_help();
@@ -1530,15 +1580,16 @@ fn parse_cli() -> anyhow::Result<Command> {
         )
     })?;
 
-    Ok(Command::Bridge(BridgeCli {
+    Ok(Command::Bridge(Box::new(BridgeCli {
         binds,
         varlink_sockets_path,
         cert,
         key,
         trust,
         authorized_keys,
+        jwt,
         auth,
-    }))
+    })))
 }
 
 #[cfg(feature = "sshauth")]
@@ -1568,9 +1619,11 @@ fn parse_import_ssh_args(parser: &mut lexopt::Parser) -> anyhow::Result<Command>
 /// `etc_root` is the filesystem root for the well-known
 /// `/etc/varlink-httpd` key discovery; only tests override it.
 #[cfg_attr(not(feature = "sshauth"), allow(unused_variables))]
+#[cfg_attr(not(feature = "jwtauth"), allow(unused_variables))]
 fn build_authenticators(
     auth: &[AuthMechanism],
     authorized_keys: Option<&str>,
+    jwt: &JwtCliOptions,
     creds_dir: Option<&std::path::Path>,
     etc_root: &std::path::Path,
 ) -> anyhow::Result<Vec<Box<dyn Authenticator>>> {
@@ -1585,6 +1638,12 @@ fn build_authenticators(
                 creds_dir,
                 etc_root,
             )?)),
+            #[cfg(feature = "jwtauth")]
+            AuthMechanism::Jwt => authenticators.push(Box::new(
+                create_jwt_authenticator(jwt.clone(), creds_dir, etc_root)?.context(
+                    "--auth=jwt requires --issuer= or the varlink-httpd.jwt.issuer credential",
+                )?,
+            )),
             AuthMechanism::None => {
                 warn!("--auth=none, all routes are open without authentication");
                 authenticators.push(Box::new(AllowAllAuthenticator {
@@ -1594,6 +1653,41 @@ fn build_authenticators(
         }
     }
     Ok(authenticators)
+}
+
+/// Material only follows the selector, so a stray credential or a leftover
+/// flag cannot quietly enable or silently disable a mechanism.
+#[cfg_attr(not(feature = "sshauth"), allow(unused_variables))]
+fn validate_material_scope(
+    cli: &BridgeCli,
+    creds_dir: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    #[cfg(feature = "sshauth")]
+    if cli.authorized_keys.is_some() && !cli.auth.contains(&AuthMechanism::SshAuth) {
+        bail!("--authorized-keys= is only used with --auth=sshauth");
+    }
+    #[cfg(not(feature = "sshauth"))]
+    if cli.authorized_keys.is_some() {
+        bail!("--authorized-keys= requires building with the 'sshauth' feature");
+    }
+    #[cfg(feature = "jwtauth")]
+    if cli.jwt.any_option_set() && !cli.auth.contains(&AuthMechanism::Jwt) {
+        bail!("--issuer/--audience/--issuer-jwks/--require-claim are only used with --auth=jwt");
+    }
+    #[cfg(not(feature = "jwtauth"))]
+    if cli.jwt.any_option_set() {
+        bail!(
+            "--issuer/--audience/--issuer-jwks/--require-claim require building with the 'jwtauth' feature"
+        );
+    }
+    let client_certs = ClientCerts::of(&cli.auth);
+    if client_certs != ClientCerts::Ignore
+        && cli.trust.is_none()
+        && !creds_dir.is_some_and(|d| d.join("trust").exists())
+    {
+        bail!("--auth=mtls requires --trust= or a 'trust' credential");
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -1617,21 +1711,8 @@ async fn main() -> anyhow::Result<()> {
     if cli.trust.is_some() && !cli.auth.contains(&AuthMechanism::Mtls) {
         bail!("--trust= is only used with --auth=mtls");
     }
-    #[cfg(feature = "sshauth")]
-    if cli.authorized_keys.is_some() && !cli.auth.contains(&AuthMechanism::SshAuth) {
-        bail!("--authorized-keys= is only used with --auth=sshauth");
-    }
-    #[cfg(not(feature = "sshauth"))]
-    if cli.authorized_keys.is_some() {
-        bail!("--authorized-keys= requires building with the 'sshauth' feature");
-    }
+    validate_material_scope(&cli, creds_dir.as_deref())?;
     let client_certs = ClientCerts::of(&cli.auth);
-    if client_certs != ClientCerts::Ignore
-        && cli.trust.is_none()
-        && !creds_dir.as_ref().is_some_and(|d| d.join("trust").exists())
-    {
-        bail!("--auth=mtls requires --trust= or a 'trust' credential");
-    }
 
     // vsock is a point-to-point host/guest channel, so a generated certificate
     // nobody can verify buys little there and would force a state directory on
@@ -1647,6 +1728,7 @@ async fn main() -> anyhow::Result<()> {
     let authenticators = build_authenticators(
         &cli.auth,
         cli.authorized_keys.as_deref(),
+        &cli.jwt,
         creds_dir.as_deref(),
         std::path::Path::new("/"),
     )?;
