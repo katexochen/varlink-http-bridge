@@ -31,7 +31,7 @@ build profile:
 
 check: check_srv_binary_size check_helper_binary_size
 	cargo fmt --check
-	cargo clippy -- -W clippy::pedantic
+	cargo clippy --all-targets -- -W clippy::pedantic
 
 test:
 	cargo test
