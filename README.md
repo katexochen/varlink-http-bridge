@@ -149,9 +149,12 @@ $ curl -s -H "Accept: application/json-seq" -H "Content-Type: application/json" 
 Systemd version v260+ supports pluggable protocols for varlink,
 which allows the bridge to be used transparently.
 
+Copy `varlinkctl-http` to `/usr/lib/systemd/varlink-bridges/http`
+and link it as `/usr/lib/systemd/varlink-bridges/{https,ws,wss,vsock,vsock+tls}`.
+This can be done automatically by `just install_client`.
+Alternatively, `$SYSTEMD_VARLINK_BRIDGES_DIR` can be set if permanent installation is not desired.
+
 ```console
-# copy varlinkctl-http into /usr/lib/systemd/varlink-bridges/http
-# (or use SYSTEMD_VARLINK_BRIDGES_DIR)
 $ varlinkctl introspect http://localhost:1031/ws/sockets/io.systemd.Hostname
 interface io.systemd
 ...
@@ -237,6 +240,9 @@ If both are enabled, systemd passes two fds to the service on activation.
 The daemon starts on demand when the first connection arrives
 and listens on boths sockets, regardless of which connection came first.
 
+The daemon binary and unit files can be installed with `just install_server`.
+
+After installation, enable with:
 ```console
 # systemctl enable --now varlink-httpd.socket varlink-httpd-vsock.socket
 ```
@@ -417,9 +423,14 @@ sniffable so the lack of encryption is acceptable:
 # Server (inside the guest):
 $ varlink-httpd --bind=vsock --authorized-keys ~/.ssh/authorized_keys
 
+# Client (on the host):
 $ varlinkctl call vsock://3/ws/sockets/io.systemd.Hostname \
     io.systemd.Hostname.Describe '{}'
 ```
+
+(If this fails with a "Protocol not supported" error, the `vsock`
+helper is not installed properly in `/usr/lib/systemd/varlink-bridges/`.
+See the installation instructions above.)
 
 ### mTLS over vsock
 
