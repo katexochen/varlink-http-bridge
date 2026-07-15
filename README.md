@@ -173,14 +173,16 @@ $ cargo install websocat
 
 # call via websocat: note that this is the raw procotol so the result is wrapped in "parameters"
 # note that the reply also contains the raw \0 so we filter them
-$ printf '{"method":"io.systemd.Hostname.Describe","parameters":{}}\0' | websocat ws://localhost:1031/ws/sockets/io.systemd.Hostname | tr -d '\0' | jq
+$ printf '{"method":"io.systemd.Hostname.Describe","parameters":{}}\0' | \
+    websocat ws://localhost:1031/ws/sockets/io.systemd.Hostname | tr -d '\0' | jq
 {
   "parameters": {
     "Hostname": "myhost",
 ...
 
 # io.systemd.Unit.List streams the output
-$ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | websocat  --no-close  ws://localhost:1031/ws/sockets/io.systemd.Manager | tr -d '\0' | jq
+$ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | \
+    websocat  --no-close  ws://localhost:1031/ws/sockets/io.systemd.Manager | tr -d '\0' | jq
 {
   "parameters": {
     "context": {
@@ -188,7 +190,8 @@ $ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | w
 ...
 
 # and user records come via "continues": true
-$ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"service":"io.systemd.Multiplexer"}, "more": true}\0' | websocat --no-close ws://localhost:1031/ws/sockets/io.systemd.Multiplexer | tr '\0' '\n' | jq
+$ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"service":"io.systemd.Multiplexer"}, "more": true}\0' | \
+    websocat --no-close ws://localhost:1031/ws/sockets/io.systemd.UserDatabase | tr '\0' '\n' | jq
 {
   "parameters": {
     "record": {
@@ -198,7 +201,7 @@ $ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"ser
 ...
 
 # varlinkctl is supported via our varlinkctl-http
-$ VARLINK_BRIDGE_URL=http://localhost:1031/ws/sockets/io.systemd.Multiplexer \
+$ VARLINK_BRIDGE_URL=http://localhost:1031/ws/sockets/io.systemd.UserDatabase \
     varlinkctl call --more /usr/libexec/varlinkctl-http \
 	io.systemd.UserDatabase.GetUserRecord '{"service":"io.systemd.Multiplexer"}'
 
