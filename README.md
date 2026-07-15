@@ -324,14 +324,14 @@ Ed25519 and ECDSA keys.
 The bridge discovers authorized keys automatically from these
 locations (first match wins):
 
-1. `--authorized-keys=PATH` — explicit CLI flag
+1. `--authorized-keys PATH` — explicit CLI flag
 2. `/etc/varlink-httpd/authorized_keys` — config file
 3. `$CREDENTIALS_DIRECTORY/ssh.authorized_keys.root` — systemd credential (see `systemd.exec(5)`)
 
 The simplest setup is to pass the path explicitly:
 
 ```console
-$ varlink-httpd --authorized-keys=~/.ssh/authorized_keys
+$ varlink-httpd --authorized-keys ~/.ssh/authorized_keys
 ```
 
 To fetch keys from GitHub (or any HTTPS URL) and save them locally,
@@ -392,7 +392,7 @@ keys for user authentication:
 $ varlink-httpd \
     --cert=server.pem \
     --key=server-key.pem \
-    --authorized-keys=~/.ssh/authorized_keys
+    --authorized-keys ~/.ssh/authorized_keys
 ```
 
 This is recommended because for websocket requests only the initial
@@ -415,7 +415,7 @@ sniffable so the lack of encryption is acceptable:
 
 ```console
 # Server (inside the guest):
-$ varlink-httpd --bind=vsock --authorized-keys=~/.ssh/authorized_keys
+$ varlink-httpd --bind=vsock --authorized-keys ~/.ssh/authorized_keys
 
 $ varlinkctl call vsock://3/ws/sockets/io.systemd.Hostname \
     io.systemd.Hostname.Describe '{}'
