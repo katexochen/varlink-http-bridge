@@ -1,8 +1,8 @@
 # varlink-httpd
 
-This is a http bridge to make local varlink services available via
-http. The main use case is systemd, so only the subset of varlink that
-systemd needs is supported right now.
+This is an HTTP bridge to make local varlink services available
+remotely. The main use case is systemd, so only the subset of varlink
+that systemd needs is supported right now.
 
 It takes a directory with varlink sockets (or symlinks to varlink
 sockets) like `/run/varlink/registry` as the argument and will serve
@@ -49,27 +49,41 @@ bridge needs a ship, and this one discovers your varlink services.
 
 ## Examples (curl)
 
-Using curl for direct calls is usually more convenient/ergonomic than
+Using `curl` for direct calls is usually more convenient/ergonomic than
 using the websocket endpoint.
 
+For demo purposes, let's first start the service *without authentication*.
+This mode is NOT SECURE! See below how to set up authentication.
+
 ```console
-$ systemd-run --user ./target/debug/varlink-httpd
+$ systemd-run --user ./target/debug/varlink-httpd --insecure
 
 $ curl -s http://localhost:1031/sockets | jq
 {
   "sockets": [
-    "io.systemd.Login",
-    "io.systemd.Hostname",
-    "io.systemd.sysext",
-    "io.systemd.BootControl",
-    "io.systemd.Import",
-    "io.systemd.Repart",
-    "io.systemd.MuteConsole",
-    "io.systemd.FactoryReset",
-    "io.systemd.Credentials",
     "io.systemd.AskPassword",
+    "io.systemd.BootControl",
+    "io.systemd.Credentials",
+    "io.systemd.FactoryReset",
+    "io.systemd.Hostname",
+    "io.systemd.Import",
+    "io.systemd.Journal",
+    "io.systemd.JournalAccess",
+    "io.systemd.Login",
+    "io.systemd.Machine",
+    "io.systemd.MachineImage",
     "io.systemd.Manager",
-    "io.systemd.ManagedOOM"
+    "io.systemd.MountFileSystem",
+    "io.systemd.MuteConsole",
+    "io.systemd.NamespaceResource",
+    "io.systemd.Repart",
+    "io.systemd.Resolve",
+    "io.systemd.Resolve.Monitor",
+    "io.systemd.Shutdown",
+    "io.systemd.Udev",
+    "io.systemd.Unit",
+    "io.systemd.UserDatabase",
+    "io.systemd.sysext"
   ]
 }
 
@@ -95,7 +109,7 @@ $ curl -s http://localhost:1031/sockets/io.systemd.Hostname/io.systemd.Hostname 
 }
 
 $ curl -s -X POST http://localhost:1031/call/io.systemd.Hostname.Describe -d '{}' -H "Content-Type: application/json" | jq .StaticHostname
-"top"
+"myhost"
 
 $ curl -s -X POST http://localhost:1031/call/org.varlink.service.GetInfo?socket=io.systemd.Hostname -d '{}' -H "Content-Type: application/json" | jq
 {
@@ -111,28 +125,43 @@ $ curl -s -X POST http://localhost:1031/call/org.varlink.service.GetInfo?socket=
   "version": "259 (259-1)"
 }
 
-# streaming methods use Accept: application/json-seq (RFC 7464)
+# streaming methods use 'Accept: application/json-seq' (RFC 7464)
 $ curl -s -H "Accept: application/json-seq" -H "Content-Type: application/json" \
     http://localhost:1031/call/io.systemd.UserDatabase.GetUserRecord \
     -d '{"service":"io.systemd.Multiplexer"}' | jq --seq
-
+{
+  "incomplete": true,
+  "record": {
+    "gid": 0,
+    "homeDirectory": "/root",
+    "realName": "Super User",
+    "shell": "/bin/bash",
+    ...
+    "uid": 0,
+    "userName": "root"
+  }
+}
+...
 ```
 
-## Example (varlinkctl transparent bridge mode)
+## Examples (varlinkctl transparent bridge mode)
 
-Systemd version v260+ supports pluggable protocols for varlink, with that the bridge
-becomes even nicer.
+Systemd version v260+ supports pluggable protocols for varlink,
+which allows the bridge to be used transparently.
+
+Copy `varlinkctl-http` to `/usr/lib/systemd/varlink-bridges/http`
+and link it as `/usr/lib/systemd/varlink-bridges/{https,ws,wss,vsock,vsock+tls}`.
+This can be done automatically by `just install_client`.
+Alternatively, `$SYSTEMD_VARLINK_BRIDGES_DIR` can be set if permanent installation is not desired.
 
 ```console
-# copy varlinkctl-http into /usr/lib/systemd/varlink-bridges/http
-# (or use SYSTEMD_VARLINK_BRIDGES_DIR)
 $ varlinkctl introspect http://localhost:1031/ws/sockets/io.systemd.Hostname
 interface io.systemd
 ...
 
 $ varlinkctl call http://localhost:1031/ws/sockets/io.systemd.Hostname io.systemd.Hostname.Describe {}
 {
-        "Hostname" : "top",
+        "Hostname" : "myhost",
 ...
 ```
 
@@ -147,14 +176,16 @@ $ cargo install websocat
 
 # call via websocat: note that this is the raw procotol so the result is wrapped in "parameters"
 # note that the reply also contains the raw \0 so we filter them
-$ printf '{"method":"io.systemd.Hostname.Describe","parameters":{}}\0' | websocat ws://localhost:1031/ws/sockets/io.systemd.Hostname | tr -d '\0' | jq
+$ printf '{"method":"io.systemd.Hostname.Describe","parameters":{}}\0' | \
+    websocat ws://localhost:1031/ws/sockets/io.systemd.Hostname | tr -d '\0' | jq
 {
   "parameters": {
-    "Hostname": "top",
+    "Hostname": "myhost",
 ...
 
 # io.systemd.Unit.List streams the output
-$ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | websocat  --no-close  ws://localhost:1031/ws/sockets/io.systemd.Manager| tr -d '\0' | jq
+$ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | \
+    websocat  --no-close  ws://localhost:1031/ws/sockets/io.systemd.Manager | tr -d '\0' | jq
 {
   "parameters": {
     "context": {
@@ -162,7 +193,8 @@ $ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | w
 ...
 
 # and user records come via "continues": true
-$ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"service":"io.systemd.Multiplexer"}, "more": true}\0' | websocat --no-close ws://localhost:1031/ws/sockets/io.systemd.Multiplexer | tr '\0' '\n'|jq
+$ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"service":"io.systemd.Multiplexer"}, "more": true}\0' | \
+    websocat --no-close ws://localhost:1031/ws/sockets/io.systemd.UserDatabase | tr '\0' '\n' | jq
 {
   "parameters": {
     "record": {
@@ -172,10 +204,9 @@ $ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"ser
 ...
 
 # varlinkctl is supported via our varlinkctl-http
-$ VARLINK_BRIDGE_URL=http://localhost:1031/ws/sockets/io.systemd.Multiplexer \
+$ VARLINK_BRIDGE_URL=http://localhost:1031/ws/sockets/io.systemd.UserDatabase \
     varlinkctl call --more /usr/libexec/varlinkctl-http \
 	io.systemd.UserDatabase.GetUserRecord '{"service":"io.systemd.Multiplexer"}'
-
 
 # libvarlink bridge mode gives full varlink CLI support over the network
 $ varlink --bridge "websocat --binary ws://localhost:1031/ws/sockets/io.systemd.Hostname" info
@@ -186,56 +217,14 @@ Product: systemd (systemd-hostnamed)
 $ varlink --bridge "websocat --binary ws://localhost:1031/ws/sockets/io.systemd.Hostname" \
     call io.systemd.Hostname.Describe
 {
-  "Hostname": "top",
-  "StaticHostname": "top",
+  "Hostname": "myhost",
+  "StaticHostname": "myhost",
   ...
 }
-
 ```
 
-## vsock transport
 
-The bridge supports AF_VSOCK as an alternative to TCP, allowing
-host-to-guest communication without a network. vsock traffic cannot
-be sniffed on the network, but any process on the host can connect
-to a guest's vsock port, so authentication is still required (mTLS
-or SSH key auth).
-
-### SSH key auth over vsock
-
-vsock with SSH key auth works without TLS - the transport is not
-sniffable so the lack of encryption is acceptable:
-
-```console
-# Server (inside the guest):
-$ varlink-httpd --bind=vsock --authorized-keys=~/.ssh/authorized_keys
-
-# Client (on the host):
-$ varlinkctl call vsock://3/ws/sockets/io.systemd.Hostname \
-    io.systemd.Hostname.Describe '{}'
-```
-
-### mTLS over vsock
-
-Server (inside the guest):
-
-```console
-$ varlink-httpd --bind=vsock \
-    --cert=server.pem --key=server-key.pem --trust=ca.pem
-```
-
-Client (on the host), using `vsock+tls://`:
-
-```console
-$ varlinkctl call vsock+tls://3/ws/sockets/io.systemd.Hostname \
-    io.systemd.Hostname.Describe '{}'
-```
-
-The client looks for its certificate and key in the same config
-directories as for TCP (see [Client (varlinkctl-http)](#client-varlinkctl-http)
-below). CID 3+ are guests; CID 2 is the host.
-
-### systemd socket activation
+## Systemd services
 
 Two socket units are shipped, both backed by the same
 `varlink-httpd.service`:
@@ -246,16 +235,29 @@ Two socket units are shipped, both backed by the same
   bare metal or the host it is silently skipped, which makes it safe
   to enable unconditionally.
 
-Enable whichever sockets you want; if both are enabled, systemd passes
-both listening fds to the service on activation, so the daemon listens
-on both transports regardless of which connection arrives first. The
-daemon starts on demand when the first connection arrives.
+Both sockets can be enabled at the same time.
+If both are enabled, systemd passes two fds to the service on activation.
+The daemon starts on demand when the first connection arrives
+and listens on boths sockets, regardless of which connection came first.
 
+The daemon binary and unit files can be installed with `just install_server`.
+
+After installation, enable with:
 ```console
 # systemctl enable --now varlink-httpd.socket varlink-httpd-vsock.socket
 ```
 
-## TLS / mTLS
+## Authentication
+
+Since `varlink-httpd` runs as root, allows connections over the
+network, exposes privileged information and allows arbitrary commands
+to be invoked, authentication MUST be used.
+
+Two modes of authenentication are supported:
+TLS certificates and SSH key signatures.
+
+
+### TLS / mTLS
 
 TLS flag names follow the systemd convention.
 
@@ -268,7 +270,7 @@ TLS flag names follow the systemd convention.
 Providing `--trust=` implicitly enables mTLS: the server will
 require clients to present a certificate signed by that CA.
 
-### systemd credentials
+#### systemd credentials
 
 When running as a systemd service, the bridge discovers TLS material
 from `$CREDENTIALS_DIRECTORY` (see `systemd.exec(5)`).  The credential
@@ -286,7 +288,7 @@ them to the short names the service expects.  To provision TLS:
 
 Explicit CLI flags take priority over credentials.
 
-### Client (varlinkctl-http)
+#### Client (varlinkctl-http)
 
 The `varlinkctl-http` binary acts as a bridge between `varlinkctl`
 and `varlink-httpd`, supporting TLS and mTLS. It looks for
@@ -316,26 +318,26 @@ $ VARLINK_BRIDGE_URL=https://myhost:1031/ws/sockets/io.systemd.Hostname \
     io.systemd.Hostname.Describe '{}'
 ```
 
-## SSH key authentication
+### SSH key authentication
 
 The bridge can authenticate requests using SSH public keys. If you
 have an SSH agent running clients authenticate automatically with zero
 extra configuration. Note that RSA keys are *not* supported, just
 Ed25519 and ECDSA keys.
 
-### Server setup
+#### Server setup
 
 The bridge discovers authorized keys automatically from these
 locations (first match wins):
 
-1. `--authorized-keys=PATH` — explicit CLI flag
+1. `--authorized-keys PATH` — explicit CLI flag
 2. `/etc/varlink-httpd/authorized_keys` — config file
 3. `$CREDENTIALS_DIRECTORY/ssh.authorized_keys.root` — systemd credential (see `systemd.exec(5)`)
 
 The simplest setup is to pass the path explicitly:
 
 ```console
-$ varlink-httpd --authorized-keys=~/.ssh/authorized_keys
+$ varlink-httpd --authorized-keys ~/.ssh/authorized_keys
 ```
 
 To fetch keys from GitHub (or any HTTPS URL) and save them locally,
@@ -362,7 +364,7 @@ credentials automatically (discovery paths 3 and 4):
 LoadCredential=ssh.authorized_keys.root:/root/.ssh/authorized_keys
 ```
 
-### Client setup (key selection)
+#### Client setup (key selection)
 
 The varlinkctl-http uses two methods for signing, checked in order:
 
@@ -386,7 +388,7 @@ Using `VARLINK_SSH_KEY` is useful in environments without an SSH agent
 Environment=VARLINK_SSH_KEY=/my/private/bridge_key
 ```
 
-### Combining with TLS
+#### Combining with TLS
 
 SSH key auth and TLS/mTLS are independent and should be combined. For
 example, use regular TLS (not mTLS) for transport encryption and SSH
@@ -396,9 +398,56 @@ keys for user authentication:
 $ varlink-httpd \
     --cert=server.pem \
     --key=server-key.pem \
-    --authorized-keys=~/.ssh/authorized_keys
+    --authorized-keys ~/.ssh/authorized_keys
 ```
 
 This is recommended because for websocket requests only the initial
 "upgrade" request is signed with the ssh key, after the upgrade it is
 a plain WebSocket which relies on the underlying TLS for security.
+
+
+## vsock transport
+
+The bridge supports `AF_VSOCK` as an alternative to TCP, allowing
+host-to-guest communication without a network. vsock traffic cannot
+be sniffed on the network, but any process on the host can connect
+to a guest's vsock port, so authentication is still recommended
+(mTLS, SSH key auth, or both).
+
+### SSH key auth over vsock
+
+vsock with SSH key auth works without TLS — the transport is not
+sniffable so the lack of encryption is acceptable:
+
+```console
+# Server (inside the guest):
+$ varlink-httpd --bind=vsock --authorized-keys ~/.ssh/authorized_keys
+
+# Client (on the host):
+$ varlinkctl call vsock://3/ws/sockets/io.systemd.Hostname \
+    io.systemd.Hostname.Describe '{}'
+```
+
+(If this fails with a "Protocol not supported" error, the `vsock`
+helper is not installed properly in `/usr/lib/systemd/varlink-bridges/`.
+See the installation instructions above.)
+
+### mTLS over vsock
+
+Server (inside the guest):
+
+```console
+$ varlink-httpd --bind=vsock \
+    --cert=server.pem --key=server-key.pem --trust=ca.pem
+```
+
+Client (on the host), using `vsock+tls://`:
+
+```console
+$ varlinkctl call vsock+tls://3/ws/sockets/io.systemd.Hostname \
+    io.systemd.Hostname.Describe '{}'
+```
+
+The client looks for its certificate and key in the same config
+directories as for TCP (see [Client (varlinkctl-http)](#client-varlinkctl-http)
+below). CID 3+ are guests; CID 2 is the host.
