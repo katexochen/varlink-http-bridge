@@ -4,4 +4,3 @@
 mkosi.tools
 mkosi.tools.manifest
 *.list
-Cargo.lock

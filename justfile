@@ -27,14 +27,14 @@ install_config:
 
 [private]
 build profile:
-	cargo build --profile {{profile}}
+	cargo build --profile {{profile}} --locked
 
 check: check_srv_binary_size check_helper_binary_size
 	cargo fmt --check
-	cargo clippy --all-targets -- -W clippy::pedantic
+	cargo clippy --all-targets --locked -- -W clippy::pedantic
 
 test:
-	cargo test
+	cargo test --locked
 
 # the httpd service
 srv_binary := "target/release/varlink-httpd"
@@ -48,7 +48,7 @@ helper_max_size := "2 * 1024 * 1024"
 
 [script]
 check_srv_binary_size:
-	cargo build --release
+	cargo build --release --locked
 	max_size_kb="$(({{srv_max_size}} / 1024 ))"
 	cur_size_kb=$(( $(stat --format='%s' {{srv_binary}}) / 1024 ))
 	echo "release varlink-httpd binary: ${cur_size_kb}KB / ${max_size_kb}KB"
@@ -59,7 +59,7 @@ check_srv_binary_size:
 
 [script]
 check_helper_binary_size:
-	cargo build --release
+	cargo build --release --locked
 	max_size_kb="$(({{helper_max_size}} / 1024 ))"
 	cur_size_kb=$(( $(stat --format='%s' {{helper_binary}}) / 1024 ))
 	echo "release varlinkctl-http binary: ${cur_size_kb}KB / ${max_size_kb}KB"
