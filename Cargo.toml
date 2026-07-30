@@ -65,3 +65,5 @@ tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 strip = true
+lto = true
+codegen-units = 1
