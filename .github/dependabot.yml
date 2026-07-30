@@ -4,6 +4,32 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+    # No `versioning-strategy` here: cargo's default is `increase-if-necessary`,
+    # which is what we want, and setting it explicitly is an error (that's a
+    # dependabot bug: the schema only accepts `auto` and `lockfile-only` for
+    # cargo).
+    # The strategy rewrites a requirement in Cargo.toml only where it genuinely
+    # forbids the new version. So `serde = "1"` keeps its hand-picked shape and
+    # only the lock moves, while `zlink = "0.5"` does get raised for 0.7,
+    # because a caret range on a 0.x crate permits nothing but patch releases.
+    # We need both halves: 19 of our 30 versioned crates.io dependencies sit on
+    # 0.x, so a strategy that only ever touched the lock would freeze most of
+    # them.
+
+    # the vast majority of packages in the lock are transitive, and that is where most
+    # advisories land, but dependabot only offers direct dependencies by default.
+    allow:
+      - dependency-type: all
+    # Patch bumps are near-entirely transitive lock churn, so batch them into one
+    # pull request instead of running CI once per crate. Everything else arrives
+    # on its own, so a breaking 0.x bump does not ride along with 200 unrelated
+    # patches. Security updates are never grouped.
+    groups:
+      cargo-patch:
+        patterns: ["*"]
+        update-types: ["patch"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
