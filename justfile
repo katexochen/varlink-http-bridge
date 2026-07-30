@@ -39,7 +39,7 @@ test:
 # the httpd service
 srv_binary := "target/release/varlink-httpd"
 # max_size_kb is a bit arbitrary but it should ensure we don't increase size too much
-# without noticing (currently at 3.2MB)
+# without noticing
 srv_max_size := "4 * 1024 * 1024"
 
 # the varlinkctl http transport so that varlinkctl can talk over http/ws
@@ -51,7 +51,7 @@ check_srv_binary_size:
 	cargo build --release
 	max_size_kb="$(({{srv_max_size}} / 1024 ))"
 	cur_size_kb=$(( $(stat --format='%s' {{srv_binary}}) / 1024 ))
-	echo "release binary: ${cur_size_kb}KB / ${max_size_kb}KB"
+	echo "release varlink-httpd binary: ${cur_size_kb}KB / ${max_size_kb}KB"
 	if [ "$cur_size_kb" -gt "$max_size_kb" ]; then
 	  echo "ERROR: release binary exceeds limit"
 	  exit 1
