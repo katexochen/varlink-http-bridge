@@ -18,16 +18,6 @@ use tokio_tungstenite::tungstenite::{self, Message};
 #[cfg(feature = "sshauth")]
 mod sshauth_client;
 
-#[cfg(feature = "sshauth")]
-use sshauth_client::maybe_add_auth_headers;
-#[cfg(not(feature = "sshauth"))]
-async fn maybe_add_auth_headers(
-    _request: &mut tungstenite::http::Request<()>,
-    _tls_channel_binding: Option<&str>,
-) -> Result<()> {
-    Ok(())
-}
-
 /// One object-safe type for all transport combinations
 /// (TCP/vsock, with/without TLS).
 trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -196,7 +186,29 @@ fn resp_body_text(resp: &tungstenite::http::Response<Option<Vec<u8>>>) -> Option
         .map(|b| String::from_utf8_lossy(b).into_owned())
 }
 
+#[cfg(feature = "sshauth")]
 async fn connect_ws(url: &str) -> Result<Ws> {
+    sshauth_client::connect_with_ssh_retry(async |key| {
+        let (stream, mut request, tcb) = connect_transport(url).await?;
+        if let Some(key) = key {
+            sshauth_client::add_auth_headers(&mut request, key, tcb.as_deref()).await?;
+        }
+        ws_upgrade(request, stream, tcb.is_some()).await
+    })
+    .await
+}
+
+#[cfg(not(feature = "sshauth"))]
+async fn connect_ws(url: &str) -> Result<Ws> {
+    let (stream, request, tcb) = connect_transport(url).await?;
+    ws_upgrade(request, stream, tcb.is_some()).await
+}
+
+/// The TLS channel binding is returned so auth headers can be signed
+/// over it before the WebSocket upgrade.
+async fn connect_transport(
+    url: &str,
+) -> Result<(BoxedStream, tungstenite::http::Request<()>, Option<String>)> {
     use tungstenite::client::IntoClientRequest;
 
     let (stream, ws_url, tls_channel_binding) = if let Some(rest) = url.strip_prefix("vsock+tls://")
@@ -207,15 +219,22 @@ async fn connect_ws(url: &str) -> Result<Ws> {
     } else {
         connect_tcp(url).await?
     };
-    let is_tls = tls_channel_binding.is_some();
 
     // Use into_client_request() here as it auto-generates standard WS upgrade headers,
     // then we add our auth headers too
-    let mut request = ws_url
+    let request = ws_url
         .into_client_request()
         .context("building WS request")?;
-    maybe_add_auth_headers(&mut request, tls_channel_binding.as_deref()).await?;
+    Ok((stream, request, tls_channel_binding))
+}
 
+async fn ws_upgrade(
+    request: tungstenite::http::Request<()>,
+    stream: BoxedStream,
+    is_tls: bool,
+) -> Result<Ws> {
+    // anyhow keeps the tungstenite::Error downcastable through context():
+    // the SSH-retry logic detects a 401 via downcast_ref.
     let (ws, _) = tokio_tungstenite::client_async(request, stream)
         .await
         .map_err(|e| {
@@ -535,5 +554,39 @@ mod tests {
         assert!(parse_vsock_url("http://localhost").is_err());
         assert!(parse_vsock_url("vsock://notanumber:1031/path").is_err());
         assert!(parse_vsock_url("vsock://2:notaport/path").is_err());
+    }
+
+    #[cfg(feature = "sshauth")]
+    mod sshauth {
+        use super::*;
+
+        /// Wraps the handshake error the same way `ws_upgrade` does.
+        async fn handshake_error(response: &'static str) -> anyhow::Error {
+            // capacity must fit the unread client request or the handshake deadlocks
+            let (client, mut server) = tokio::io::duplex(64 * 1024);
+            server.write_all(response.as_bytes()).await.unwrap();
+            tokio_tungstenite::client_async("ws://localhost/", client)
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow::Error::new(e).context("WebSocket handshake failed"))
+                .expect_err("handshake should fail")
+        }
+
+        /// A handshake 401 must stay downcastable to `tungstenite::Error::Http`
+        /// through the anyhow context so the sshauth retry logic can detect it.
+        #[tokio::test]
+        async fn test_ws_handshake_401_is_detected_as_unauthorized() {
+            let err =
+                handshake_error("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n").await;
+            assert!(sshauth_client::is_http_unauthorized(&err), "{err:#}");
+        }
+
+        #[tokio::test]
+        async fn test_ws_handshake_other_error_is_not_unauthorized() {
+            let err =
+                handshake_error("HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            assert!(!sshauth_client::is_http_unauthorized(&err), "{err:#}");
+        }
     }
 }

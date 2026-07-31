@@ -52,7 +52,10 @@ openssl = "0.10.81"
 tokio-openssl = "0.6"
 indoc = "2.0.7"
 ssh-key = { version = "0.6", optional = true }
-sshauth = { version = "0.1", optional = true }
+# TODO: switch back to crates.io once SkEd25519 (hardware key) support is
+# merged and released (https://github.com/mvo5/sshauth/tree/add-support-for-SkEd25519)
+# (see https://github.com/oxidecomputer/sshauth/pull/8)
+sshauth = { git = "https://github.com/mvo5/sshauth.git", branch = "add-support-for-SkEd25519", optional = true }
 tempfile = { version = "3.27", optional = true }
 ssh-key-import = { path = "crates/ssh-key-import", optional = true }
 
