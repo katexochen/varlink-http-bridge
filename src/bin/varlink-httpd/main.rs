@@ -1360,6 +1360,48 @@ fn parse_import_ssh_args(parser: &mut lexopt::Parser) -> anyhow::Result<Command>
     Ok(Command::ImportSsh(import_ssh::ImportSsh { source, output }))
 }
 
+/// `etc_root` is the filesystem root for the well-known
+/// `/etc/varlink-httpd` key discovery; only tests override it.
+#[cfg_attr(not(feature = "sshauth"), allow(unused_variables))]
+fn build_authenticators(
+    authorized_keys: Option<String>,
+    creds_dir: Option<&std::path::Path>,
+    etc_root: &std::path::Path,
+    insecure: bool,
+    has_mtls: bool,
+) -> anyhow::Result<Vec<Box<dyn Authenticator>>> {
+    let mut authenticators: Vec<Box<dyn Authenticator>> = Vec::new();
+
+    #[cfg(feature = "sshauth")]
+    {
+        let ssh_auth = create_ssh_authenticator(authorized_keys, creds_dir, etc_root)?;
+        authenticators.push(Box::new(ssh_auth));
+    }
+
+    if insecure {
+        authenticators.clear();
+        authenticators.push(Box::new(AllowAllAuthenticator {
+            reason: "--insecure",
+        }));
+        eprintln!("WARNING: running without authentication - all routes are open");
+    } else if authenticators.is_empty() {
+        if has_mtls {
+            // mTLS verifies the client during the TLS handshake; no
+            // additional per-request HTTP authentication is needed.
+            authenticators.push(Box::new(AllowAllAuthenticator {
+                reason: "mTLS verified at TLS layer",
+            }));
+        } else {
+            #[cfg(not(feature = "sshauth"))]
+            bail!(
+                "no authentication configured: build with 'sshauth' feature, use --trust=, or --insecure"
+            );
+        }
+    }
+
+    Ok(authenticators)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // not using "tracing" crate here because its quite big (>1.2mb to the production build)
@@ -1386,38 +1428,13 @@ async fn main() -> anyhow::Result<()> {
         bail!("--authorized-keys= requires building with the 'sshauth' feature");
     }
 
-    let mut authenticators: Vec<Box<dyn Authenticator>> = Vec::new();
-
-    #[cfg(feature = "sshauth")]
-    {
-        let ssh_auth = create_ssh_authenticator(
-            cli.authorized_keys,
-            creds_dir.as_deref(),
-            std::path::Path::new("/"),
-        )?;
-        authenticators.push(Box::new(ssh_auth));
-    }
-
-    if cli.insecure {
-        authenticators.clear();
-        authenticators.push(Box::new(AllowAllAuthenticator {
-            reason: "--insecure",
-        }));
-        eprintln!("WARNING: running without authentication - all routes are open");
-    } else if authenticators.is_empty() {
-        if has_mtls {
-            // mTLS verifies the client during the TLS handshake; no
-            // additional per-request HTTP authentication is needed.
-            authenticators.push(Box::new(AllowAllAuthenticator {
-                reason: "mTLS verified at TLS layer",
-            }));
-        } else {
-            #[cfg(not(feature = "sshauth"))]
-            bail!(
-                "no authentication configured: build with 'sshauth' feature, use --trust=, or --insecure"
-            );
-        }
-    }
+    let authenticators = build_authenticators(
+        cli.authorized_keys,
+        creds_dir.as_deref(),
+        std::path::Path::new("/"),
+        cli.insecure,
+        has_mtls,
+    )?;
 
     let app = create_router(&cli.varlink_sockets_path, authenticators)?;
 
