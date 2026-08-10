@@ -31,6 +31,7 @@ fn check_request(
         path,
         headers: &headers,
         tls_channel_binding,
+        client_cert_verified: None,
     })
 }
 
@@ -732,7 +733,7 @@ async fn test_varlink_conn_cache_reuses_connection() {
         varlink_sockets: sockets,
         authenticators: Arc::new(Vec::new()),
     };
-    let cache = VarlinkConnCache::new(None);
+    let cache = VarlinkConnCache::new(None, None);
 
     let conn1 = get_varlink_connection("io.systemd.Hostname", &state, &cache)
         .await
@@ -2121,6 +2122,36 @@ mod sshauth_tests {
             auth.key_count(),
             3,
             ".root (1 key) + two per-provider credentials (1 key each) should be merged"
+        );
+    }
+
+    // pins the auth matrix: a TLS-verified client cert alone suffices,
+    // while a certless connection still needs an HTTP-level method
+    #[test]
+    fn test_build_authenticators_mtls_and_ssh_keys() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let (pubkey_line, _key_path) = generate_ed25519_keypair(tmpdir.path());
+        let root = make_test_rootdir_with_keys(&[pubkey_line.trim()]);
+        let auths = crate::build_authenticators(None, None, root.path(), false, true).unwrap();
+        let headers = axum::http::HeaderMap::new();
+        let with_cert = AuthRequest {
+            method: "GET",
+            path: "/sockets",
+            headers: &headers,
+            tls_channel_binding: None,
+            client_cert_verified: Some("CN=test-client"),
+        };
+        assert!(
+            auths.iter().any(|a| a.check_request(&with_cert).is_ok()),
+            "TLS-verified client cert must suffice without further HTTP auth"
+        );
+        let certless = AuthRequest {
+            client_cert_verified: None,
+            ..with_cert
+        };
+        assert!(
+            auths.iter().all(|a| a.check_request(&certless).is_err()),
+            "certless unauthenticated request must be rejected"
         );
     }
 
