@@ -2305,6 +2305,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sshauth"
+version = "0.1.2"
+source = "git+https://github.com/mvo5/sshauth.git?branch=add-support-for-SkEd25519#afd9b4e549d0e9229c2910c94aa7bca76623dfdb"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "ecdsa",
+ "p256",
+ "postcard",
+ "serde",
+ "sha2",
+ "slog",
+ "ssh-encoding",
+ "ssh-key",
+ "tokio",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
