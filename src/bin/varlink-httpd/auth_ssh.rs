@@ -369,13 +369,15 @@ pub(crate) fn create_ssh_authenticator(
 
 impl Authenticator for SshKeyAuthenticator {
     fn check_request(&self, request: &AuthRequest) -> anyhow::Result<()> {
+        // Cheapest check first: without a token there is nothing to verify,
+        // and an unauthenticated caller should not make us stat the key files.
+        let (method, path) = (request.method, request.path);
+        let token_str = request.bearer_token()?;
+
         self.authorized_keys
             .lock()
             .unwrap()
             .maybe_reload(&self.paths);
-
-        let (method, path) = (request.method, request.path);
-        let token_str = request.bearer_token()?;
         let nonce =
             extract_nonce(request.headers).context("missing nonce header (x-auth-nonce)")?;
         let nonce = nonce.as_str();

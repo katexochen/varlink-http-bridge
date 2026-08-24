@@ -375,6 +375,13 @@ async fn tls_accept<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     Ok(tls_stream)
 }
 
+/// How many TLS handshakes may be in flight at once, and how long one may
+/// take. Both bound what an unauthenticated peer can tie up; the timeout is
+/// well above the two round trips TLS 1.3 needs, but short enough that
+/// stalled peers cannot hold the slots for long.
+const MAX_TLS_HANDSHAKES: usize = 256;
+const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// TLS wrapper for any `axum::serve::Listener`. Performs handshakes concurrently
 /// so a slow or stalled client cannot block other connections. A background task
 /// accepts raw connections and spawns a task per handshake; completed TLS streams
@@ -393,20 +400,29 @@ where
     fn new(mut inner: L, acceptor: openssl::ssl::SslAcceptor) -> std::io::Result<Self> {
         let local_addr = inner.local_addr()?;
         let (tx, rx) = tokio::sync::mpsc::channel(256);
+        // Bound number of handshakes.
+        let handshakes = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_TLS_HANDSHAKES));
 
         tokio::spawn(async move {
             loop {
                 let (stream, addr) = inner.accept().await;
+                let Ok(permit) = std::sync::Arc::clone(&handshakes).acquire_owned().await else {
+                    return; // semaphore closed, we are shutting down
+                };
                 let tx = tx.clone();
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
-                    match tls_accept(&acceptor, stream).await {
-                        Ok(tls_stream) => {
+                    let _permit = permit;
+                    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, tls_accept(&acceptor, stream))
+                        .await
+                    {
+                        Ok(Ok(tls_stream)) => {
                             if tx.send((tls_stream, addr)).await.is_err() {
                                 warn!("TLS listener receiver dropped");
                             }
                         }
-                        Err(e) => warn!("TLS handshake from {addr}: {e:#}"),
+                        Ok(Err(e)) => warn!("TLS handshake from {addr}: {e:#}"),
+                        Err(_) => warn!("TLS handshake from {addr} timed out"),
                     }
                 });
             }
@@ -812,13 +828,15 @@ async fn auth_middleware(
     } else {
         errors.join("; ")
     };
+    // The detail stays in the log: naming the mechanisms that rejected tells
+    // an unauthenticated caller how the server is configured.
     debug!(
         "auth: rejected {} {}: {joined}",
         auth_request.method, auth_request.path
     );
     (
         StatusCode::UNAUTHORIZED,
-        axum::Json(json!({"error": joined})),
+        axum::Json(json!({"error": "authentication required"})),
     )
         .into_response()
 }
@@ -1557,7 +1575,8 @@ fn build_authenticators(
     etc_root: &std::path::Path,
 ) -> anyhow::Result<Vec<Box<dyn Authenticator>>> {
     let mut authenticators: Vec<Box<dyn Authenticator>> = Vec::new();
-    for mechanism in auth {
+    // Ensure we iterate cheapest first.
+    for mechanism in AuthMechanism::ALL.iter().filter(|m| auth.contains(m)) {
         match mechanism {
             AuthMechanism::Mtls => authenticators.push(Box::new(MtlsAuthenticator)),
             #[cfg(feature = "sshauth")]

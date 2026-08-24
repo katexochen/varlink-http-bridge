@@ -1823,15 +1823,6 @@ mod sshauth_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let error = json["error"].as_str().unwrap();
-        assert!(
-            error.contains("invalid token"),
-            "expected 'invalid token' in error, got: {error}"
-        );
     }
 
     struct RejectingAuthenticator(&'static str);
@@ -1917,15 +1908,17 @@ mod sshauth_tests {
         );
     }
 
+    /// Why each mechanism said no belongs in the log, not in a reply to an
+    /// unauthenticated caller who would learn how the server is configured.
     #[tokio::test]
-    async fn test_all_auth_rejected_errors_and_errors_are_joined() {
+    async fn test_auth_failure_does_not_leak_configured_mechanisms() {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
 
         let app = make_auth_test_router(vec![
-            Box::new(RejectingAuthenticator("error1")),
-            Box::new(RejectingAuthenticator("error2")),
+            Box::new(RejectingAuthenticator("mtls-specific-detail")),
+            Box::new(RejectingAuthenticator("sshauth-specific-detail")),
         ]);
         let response = app
             .oneshot(
@@ -1940,9 +1933,15 @@ mod sshauth_tests {
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let error = json["error"].as_str().unwrap();
-        assert_eq!(error, "error1; error2");
+        let error = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(error, "authentication required");
+        assert!(
+            !error.contains("detail"),
+            "leaked a mechanism error: {error}"
+        );
     }
 
     #[tokio::test]
