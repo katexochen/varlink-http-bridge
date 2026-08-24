@@ -515,7 +515,7 @@ async fn run_proxy(ws: Ws, fd3: UnixStream) -> Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let listen_fds: i32 = std::env::var("LISTEN_FDS")
         .context("LISTEN_FDS is not set")?
