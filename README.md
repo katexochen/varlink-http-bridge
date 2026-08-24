@@ -60,7 +60,7 @@ For demo purposes, let's first start the service *without authentication*.
 This mode is NOT SECURE! See below how to set up authentication.
 
 ```console
-$ systemd-run --user ./target/debug/varlink-httpd --insecure
+$ systemd-run --user ./target/debug/varlink-httpd --auth=none
 
 $ curl -s http://localhost:1031/sockets | jq
 {
@@ -227,7 +227,6 @@ $ varlink --bridge "websocat --binary ws://localhost:1031/ws/sockets/io.systemd.
 }
 ```
 
-
 ## Systemd services
 
 Two socket units are shipped, both backed by the same
@@ -257,18 +256,15 @@ Since `varlink-httpd` runs as root, allows connections over the
 network, exposes privileged information and allows arbitrary commands
 to be invoked, authentication MUST be used.
 
-Two modes of authentication are supported:
-TLS certificates and SSH key signatures.
+The `--auth=` flag is used to configure the authentication mechanisms to
+use, it takes a comma-separated list of `mtls`, `sshauth` or `none`.
+A request is accepted when any enabled mechanism accepts it (`OR` semantic
+between authenticators).
 
-They compose as follows: with `--trust=` (mTLS), the TLS handshake
-requires a certificate signed by the given CA from every client, and
-a request on such a verified connection needs no further
-authentication. HTTP-level methods (currently SSH key signatures) can
-be configured in addition, but for mTLS-verified clients they are
-optional extras. Without mTLS, at least one HTTP-level method must
-authenticate each request. In short: mTLS plus optional HTTP auth is
-the recommended setup right now.
-
+Every mechanism uses TLS on the endpoint, so the following TLS section
+applies to all mechanisms (excluding the mTLS specific parts).
+The only exclusion is the insecure `none` mechanism, which will serve
+plain HTTP without any TLS and authentication.
 
 ### TLS / mTLS
 
@@ -280,8 +276,13 @@ TLS flag names follow the systemd convention.
 --trust=PATH   path to CA certificate PEM for client verification (mTLS)
 ```
 
-Providing `--trust=` implicitly enables mTLS: the server will
-require clients to present a certificate signed by that CA.
+Notice `--trust=` only applies to the `--auth=mtls` authentication mode.
+
+`--cert=` and `--key=` are optional. Without them the bridge generates a
+self-signed certificate on first start and persists it with its key under
+`$STATE_DIRECTORY` (falling back to `$XDG_STATE_HOME`, then
+`~/.local/state`). See the "Trusting a self-signed server" section further down.
+
 
 #### systemd credentials
 
@@ -316,6 +317,7 @@ client TLS material in the first existing directory:
 | `client-cert-file`     | Client certificate PEM (for mTLS)         |
 | `client-key-file`      | Client private key PEM (for mTLS)         |
 | `server-ca-file`       | CA certificate PEM (for private/self-signed server CAs) |
+| `known-hosts`          | Server public keys recorded per peer      |
 
 The system CAs are used automatically. For mTLS, drop the client cert
 and key into the config directory:
@@ -330,6 +332,44 @@ $ VARLINK_BRIDGE_URL=https://myhost:1031/ws/sockets/io.systemd.Hostname \
     varlinkctl call exec:/usr/libexec/varlinkctl-http \
     io.systemd.Hostname.Describe '{}'
 ```
+
+##### Trusting a server with self-sigend cert
+
+`varlinkctl-http` prefers PKI verification of server certificates. For self-signed
+certificates, there is a `known-hosts` file mechanism to pin the servers public
+key on first contact. A later connection to the same sever address will fail if
+the servers public key changed.
+
+`varlink-httpd` prints it's public key pin when it generates a self-signed cert:
+
+```console
+TLS: generated self-signed certificate /var/lib/varlink-httpd/server-cert.pem (SAN: localhost, 127.0.0.1, ::1, myhost, myhost.local)
+TLS: using self-signed certificate, pin clients to sha256//SHPiyqubI9L9Nor4n+SKT5CodBou6KDBMeyJlTib/38=
+```
+
+In case no CA is configured, the key is automatically recorded and a warning is printed (trust on first use).
+Later connections must present the same key or they are refused.
+Paste the line the daemon printed to pin a host ahead of time instead:
+
+```console
+$ echo 'myhost:1031 sha256//SHPiyqubI9L9Nor4n+SKT5CodBou6KDBMeyJlTib/38=' \
+    >> ~/.config/varlinkctl-http/known-hosts
+```
+
+Entries are keyed by `host:port` (or `vsock:CID:PORT`). If a server
+legitimately changes its key, delete its line.
+
+The pin can also be used with curl:
+
+```console
+$ curl --insecure --pinnedpubkey sha256//SHPiyqubI9L9Nor4n+SKT5CodBou6KDBMeyJlTib/38= \
+    https://myhost:1031/sockets
+```
+
+`--pinnedpubkey` is checked in addition to the usual chain and hostname
+validation, which a self-signed certificate cannot pass, hence
+`--insecure` alongside it. Despite the name the connection is not
+unauthenticated: the pin still has to match exactly or curl refuses.
 
 ### SSH key authentication
 
@@ -361,7 +401,9 @@ Keys from 2, 3 and 4 are merged and deduplicated.
 The simplest setup is to pass the path explicitly:
 
 ```console
-$ varlink-httpd --authorized-keys ~/.ssh/authorized_keys
+$ varlink-httpd \
+  --auth=sshauth \
+  --authorized-keys ~/.ssh/authorized_keys
 ```
 
 To fetch keys from GitHub (or any HTTPS URL) and save them locally,
@@ -420,6 +462,7 @@ keys for user authentication:
 
 ```console
 $ varlink-httpd \
+    --auth=sshauth \
     --cert=server.pem \
     --key=server-key.pem \
     --authorized-keys ~/.ssh/authorized_keys
@@ -441,11 +484,14 @@ to a guest's vsock port, so authentication is still recommended
 ### SSH key auth over vsock
 
 vsock with SSH key auth works without TLS — the transport is not
-sniffable so the lack of encryption is acceptable:
+sniffable so the lack of encryption is acceptable. Unlike TCP, a vsock
+listener is therefore not given a generated certificate: it uses TLS only
+when `--cert=`/`--key=` are supplied, or when `--auth=mtls` needs the
+client certificates that only TLS can carry.
 
 ```console
 # Server (inside the guest):
-$ varlink-httpd --bind=vsock --authorized-keys ~/.ssh/authorized_keys
+$ varlink-httpd --auth=sshauth --bind=vsock --authorized-keys ~/.ssh/authorized_keys
 
 # Client (on the host):
 $ varlinkctl call vsock://3/ws/sockets/io.systemd.Hostname \
@@ -461,8 +507,12 @@ See the installation instructions above.)
 Server (inside the guest):
 
 ```console
-$ varlink-httpd --bind=vsock \
-    --cert=server.pem --key=server-key.pem --trust=ca.pem
+$ varlink-httpd \
+  --auth=mtls \
+  --bind=vsock \
+  --cert=server.pem \
+  --key=server-key.pem \
+  --trust=ca.pem
 ```
 
 Client (on the host), using `vsock+tls://`:
