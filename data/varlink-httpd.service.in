@@ -15,7 +15,7 @@ Conflicts=shutdown.target
 
 [Service]
 Type=simple
-ExecStart=@bindir@/varlink-httpd
+ExecStart=@bindir@/varlink-httpd --auth=sshauth
 Restart=on-failure
 RestartSec=5
 

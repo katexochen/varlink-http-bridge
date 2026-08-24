@@ -148,15 +148,19 @@ fn assert_hostname_reply(output: &std::process::Output) {
 /// Production assembly instead of hand-built authenticators, so tests
 /// catch config-to-authenticator bugs; the empty etc root keeps host
 /// SSH keys from leaking in.
-fn production_authenticators(insecure: bool, has_mtls: bool) -> Vec<Box<dyn Authenticator>> {
+fn production_authenticators(auth: &[crate::AuthMechanism]) -> Vec<Box<dyn Authenticator>> {
     let empty_etc_root = tempfile::tempdir().unwrap();
-    crate::build_authenticators(None, None, empty_etc_root.path(), insecure, has_mtls)
+    crate::build_authenticators(auth, None, None, empty_etc_root.path())
         .expect("build_authenticators failed")
 }
 
 async fn run_test_server(varlink_sockets_path: &str) -> TestServer<std::net::SocketAddr> {
-    // --insecure: these tests exercise routing, not auth
-    run_test_server_with_auth(varlink_sockets_path, production_authenticators(true, false)).await
+    // --auth=none: these tests exercise routing, not auth
+    run_test_server_with_auth(
+        varlink_sockets_path,
+        production_authenticators(&[crate::AuthMechanism::None]),
+    )
+    .await
 }
 
 async fn run_test_server_with_auth(
@@ -990,8 +994,7 @@ fn make_test_pki() -> TestPki {
     }
 }
 
-/// `has_mtls` selects the production mTLS-only assembly, otherwise
-/// `--insecure`.
+/// `has_mtls` selects the production mTLS-only assembly, otherwise `--auth=none`.
 async fn run_test_tls_server(
     varlink_sockets_path: &str,
     tls_acceptor: openssl::ssl::SslAcceptor,
@@ -1000,7 +1003,11 @@ async fn run_test_tls_server(
     run_test_tls_server_with_auth(
         varlink_sockets_path,
         tls_acceptor,
-        production_authenticators(!has_mtls, has_mtls),
+        production_authenticators(if has_mtls {
+            &[crate::AuthMechanism::Mtls]
+        } else {
+            &[crate::AuthMechanism::None]
+        }),
     )
     .await
 }
@@ -1042,6 +1049,7 @@ async fn test_tls_basic_connection() {
         pki.server_cert_path.to_str().unwrap(),
         pki.server_key_path.to_str().unwrap(),
         None,
+        crate::ClientCerts::Ignore,
     )
     .unwrap();
 
@@ -1073,6 +1081,7 @@ async fn test_mtls_accepts_client_cert_and_rejects_without() {
         pki.server_cert_path.to_str().unwrap(),
         pki.server_key_path.to_str().unwrap(),
         Some(pki.ca_cert_path.to_str().unwrap()),
+        crate::ClientCerts::Required,
     )
     .unwrap();
 
@@ -1134,6 +1143,7 @@ async fn test_mtls_only_no_ssh_keys_allows_authed_routes() {
         pki.server_cert_path.to_str().unwrap(),
         pki.server_key_path.to_str().unwrap(),
         Some(pki.ca_cert_path.to_str().unwrap()),
+        crate::ClientCerts::Required,
     )
     .unwrap();
 
@@ -1172,8 +1182,14 @@ async fn test_tls_credentials_directory_fallback() {
     std::fs::copy(&pki.server_key_path, creds_dir.path().join("key")).unwrap();
 
     // No CLI flags; resolve_tls_acceptor should pick up creds from the directory
-    let acceptor = resolve_tls_acceptor(None, None, None, Some(creds_dir.path()))
-        .expect("credentials directory fallback failed");
+    let acceptor = resolve_tls_acceptor(
+        None,
+        None,
+        None,
+        Some(creds_dir.path()),
+        crate::ClientCerts::Ignore,
+    )
+    .expect("credentials directory fallback failed");
 
     let varlink_dir = tempfile::tempdir().unwrap();
     let server = run_test_tls_server(varlink_dir.path().to_str().unwrap(), acceptor, false).await;
@@ -1203,6 +1219,7 @@ async fn test_varlinkctl_helper_mtls_hostname_describe() {
         pki.server_cert_path.to_str().unwrap(),
         pki.server_key_path.to_str().unwrap(),
         Some(pki.ca_cert_path.to_str().unwrap()),
+        crate::ClientCerts::Required,
     )
     .unwrap();
 
@@ -1241,6 +1258,7 @@ async fn test_varlinkctl_helper_mtls_no_client_cert() {
         pki.server_cert_path.to_str().unwrap(),
         pki.server_key_path.to_str().unwrap(),
         Some(pki.ca_cert_path.to_str().unwrap()),
+        crate::ClientCerts::Required,
     )
     .unwrap();
 
@@ -1277,13 +1295,55 @@ async fn test_varlinkctl_helper_mtls_no_client_cert() {
 }
 
 #[test]
+fn test_auth_selector_parsing() {
+    use crate::AuthMechanism::{Mtls, None as NoAuth, SshAuth};
+
+    assert_eq!(crate::parse_auth("mtls").unwrap(), vec![Mtls]);
+    assert_eq!(
+        crate::parse_auth(" mtls , sshauth ").unwrap(),
+        vec![Mtls, SshAuth],
+        "whitespace is tolerated and order is preserved"
+    );
+    assert_eq!(
+        crate::parse_auth("mtls,mtls").unwrap(),
+        vec![Mtls],
+        "a repeated mechanism is enabled once"
+    );
+    assert_eq!(crate::parse_auth("none").unwrap(), vec![NoAuth]);
+
+    for bad in ["", "bogus", "none,mtls", ","] {
+        assert!(crate::parse_auth(bad).is_err(), "{bad:?} must be rejected");
+    }
+}
+
+/// The verify mode is the union of what the enabled mechanisms need: a
+/// certless mechanism alongside mtls must relax it, or those clients could
+/// never finish the handshake.
+#[test]
+fn test_client_cert_policy_is_the_union_of_mechanisms() {
+    use crate::AuthMechanism::{Mtls, None as NoAuth, SshAuth};
+    use crate::ClientCerts;
+
+    assert_eq!(ClientCerts::of(&[Mtls]), ClientCerts::Required);
+    assert_eq!(ClientCerts::of(&[Mtls, SshAuth]), ClientCerts::Optional);
+    assert_eq!(ClientCerts::of(&[SshAuth]), ClientCerts::Ignore);
+    assert_eq!(ClientCerts::of(&[NoAuth]), ClientCerts::Ignore);
+}
+
+#[test]
 fn test_tls_half_configured_is_rejected() {
     let empty_dir = tempfile::tempdir().unwrap();
     for (cert, key) in [
         (Some("/nonexistent/cert.pem".to_string()), None),
         (None, Some("/nonexistent/key.pem".to_string())),
     ] {
-        let Err(err) = resolve_tls_acceptor(cert, key, None, Some(empty_dir.path())) else {
+        let Err(err) = resolve_tls_acceptor(
+            cert,
+            key,
+            None,
+            Some(empty_dir.path()),
+            crate::ClientCerts::Ignore,
+        ) else {
             panic!("--cert and --key must be given together");
         };
         assert!(
@@ -1549,7 +1609,8 @@ mod sshauth_tests {
         let (pubkey_line, key_path) = generate_ed25519_keypair(tmpdir.path());
         let root = make_test_rootdir_with_keys(&[pubkey_line.trim()]);
         let authenticators =
-            crate::build_authenticators(None, None, root.path(), false, false).unwrap();
+            crate::build_authenticators(&[crate::AuthMechanism::SshAuth], None, None, root.path())
+                .unwrap();
         // Leak both tempdirs so they live for the test duration.
         std::mem::forget(tmpdir);
         std::mem::forget(root);
@@ -1778,6 +1839,82 @@ mod sshauth_tests {
         fn check_request(&self, _request: &AuthRequest) -> anyhow::Result<()> {
             anyhow::bail!("{}", self.0)
         }
+    }
+
+    /// Auth mechanisms compose as OR: a request needs to satisfy only one of them,
+    /// whichever position it holds in the list.
+    #[tokio::test]
+    async fn test_one_accepting_mechanism_admits_the_request() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let accepting = || Box::new(crate::AllowAllAuthenticator { reason: "test" });
+        let rejecting = || Box::new(RejectingAuthenticator("no"));
+        let orders: Vec<Vec<Box<dyn Authenticator>>> = vec![
+            vec![rejecting(), accepting()],
+            vec![accepting(), rejecting()],
+        ];
+
+        for authenticators in orders {
+            let app = make_auth_test_router(authenticators);
+            let response = app
+                .oneshot(Request::get("/sockets").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "one accepting mechanism must admit the request"
+            );
+        }
+    }
+
+    /// The `--auth=mtls,sshauth` assembly through the middleware:
+    /// an mTLS-verified client is admitted without a token, and a request
+    /// with neither is refused.
+    #[tokio::test]
+    async fn test_mtls_and_sshauth_compose_as_or() {
+        use crate::AuthMechanism::{Mtls, SshAuth};
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let (pubkey_line, _key_path) = generate_ed25519_keypair(tmpdir.path());
+        let root = make_test_rootdir_with_keys(&[pubkey_line.trim()]);
+
+        // `cert` fakes what the TLS layer records for a verified client
+        let request_with =
+            |cert: Option<&str>| {
+                let mut req = Request::get("/sockets").body(Body::empty()).unwrap();
+                req.extensions_mut().insert(axum::extract::ConnectInfo(
+                    crate::VarlinkConnCache::new(None, cert.map(String::from)),
+                ));
+                req
+            };
+        let router = || {
+            make_auth_test_router(
+                crate::build_authenticators(&[Mtls, SshAuth], None, None, root.path()).unwrap(),
+            )
+        };
+
+        let admitted = router()
+            .oneshot(request_with(Some("CN=test-client")))
+            .await
+            .unwrap();
+        assert_ne!(
+            admitted.status(),
+            StatusCode::UNAUTHORIZED,
+            "an mTLS-verified client must not also need an ssh token"
+        );
+
+        let refused = router().oneshot(request_with(None)).await.unwrap();
+        assert_eq!(
+            refused.status(),
+            StatusCode::UNAUTHORIZED,
+            "a request satisfying no mechanism must be refused"
+        );
     }
 
     #[tokio::test]
@@ -2131,36 +2268,6 @@ mod sshauth_tests {
         );
     }
 
-    // pins the auth matrix: a TLS-verified client cert alone suffices,
-    // while a certless connection still needs an HTTP-level method
-    #[test]
-    fn test_build_authenticators_mtls_and_ssh_keys() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let (pubkey_line, _key_path) = generate_ed25519_keypair(tmpdir.path());
-        let root = make_test_rootdir_with_keys(&[pubkey_line.trim()]);
-        let auths = crate::build_authenticators(None, None, root.path(), false, true).unwrap();
-        let headers = axum::http::HeaderMap::new();
-        let with_cert = AuthRequest {
-            method: "GET",
-            path: "/sockets",
-            headers: &headers,
-            tls_channel_binding: None,
-            client_cert_verified: Some("CN=test-client"),
-        };
-        assert!(
-            auths.iter().any(|a| a.check_request(&with_cert).is_ok()),
-            "TLS-verified client cert must suffice without further HTTP auth"
-        );
-        let certless = AuthRequest {
-            client_cert_verified: None,
-            ..with_cert
-        };
-        assert!(
-            auths.iter().all(|a| a.check_request(&certless).is_err()),
-            "certless unauthenticated request must be rejected"
-        );
-    }
-
     #[test_with::path(/usr/bin/varlinkctl)]
     #[test_with::path(/run/systemd/io.systemd.Hostname)]
     #[tokio::test]
@@ -2172,6 +2279,7 @@ mod sshauth_tests {
             pki.server_cert_path.to_str().unwrap(),
             pki.server_key_path.to_str().unwrap(),
             None,
+            crate::ClientCerts::Ignore,
         )
         .unwrap();
 

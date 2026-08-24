@@ -490,10 +490,115 @@ impl Connected<IncomingStream<'_, AsyncTlsListener<VsockListener>>> for VarlinkC
     }
 }
 
+/// An authentication mechanism selected with `--auth=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthMechanism {
+    /// Client certificate, verified against `--trust`.
+    Mtls,
+    /// Bearer token signed by an authorized SSH key.
+    #[cfg(feature = "sshauth")]
+    SshAuth,
+    /// No authentication at all, over plain HTTP.
+    None,
+}
+
+impl AuthMechanism {
+    const ALL: &'static [Self] = &[
+        Self::Mtls,
+        #[cfg(feature = "sshauth")]
+        Self::SshAuth,
+        Self::None,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mtls => "mtls",
+            #[cfg(feature = "sshauth")]
+            Self::SshAuth => "sshauth",
+            Self::None => "none",
+        }
+    }
+
+    /// The mechanisms this build accepts, for help and error messages.
+    fn names() -> String {
+        Self::ALL
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Whether a client must present a certificate to use this mechanism.
+    /// A token mechanism answers false, which relaxes the TLS verify mode.
+    fn requires_client_cert(self) -> bool {
+        matches!(self, Self::Mtls)
+    }
+
+    fn parse(name: &str) -> anyhow::Result<Self> {
+        if let Some(mechanism) = Self::ALL.iter().copied().find(|m| m.as_str() == name) {
+            return Ok(mechanism);
+        }
+        #[cfg(not(feature = "sshauth"))]
+        if name == "sshauth" {
+            bail!("--auth=sshauth requires building with the 'sshauth' feature");
+        }
+        bail!(
+            "unknown --auth mechanism '{name}' (valid: {})",
+            Self::names()
+        );
+    }
+}
+
+fn parse_auth(value: &str) -> anyhow::Result<Vec<AuthMechanism>> {
+    let mut auth = Vec::new();
+    for name in value.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        let mechanism = AuthMechanism::parse(name)?;
+        if !auth.contains(&mechanism) {
+            auth.push(mechanism);
+        }
+    }
+    if auth.is_empty() {
+        bail!(
+            "--auth= needs at least one mechanism ({})",
+            AuthMechanism::names()
+        );
+    }
+    if auth.contains(&AuthMechanism::None) && auth.len() > 1 {
+        bail!("--auth=none cannot be combined with other mechanisms");
+    }
+    Ok(auth)
+}
+
+/// What the TLS layer asks of client certificates, the union of what the
+/// enabled mechanisms need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientCerts {
+    /// Not requested; no enabled mechanism uses them.
+    Ignore,
+    /// Requested and verified, but a client may present none because another
+    /// enabled mechanism can authenticate it.
+    Optional,
+    /// Requested and required: every enabled mechanism needs one.
+    Required,
+}
+
+impl ClientCerts {
+    fn of(auth: &[AuthMechanism]) -> Self {
+        if !auth.iter().any(|m| m.requires_client_cert()) {
+            Self::Ignore
+        } else if auth.iter().all(|m| m.requires_client_cert()) {
+            Self::Required
+        } else {
+            Self::Optional
+        }
+    }
+}
+
 fn load_tls_acceptor(
     cert_path: &str,
     key_path: &str,
     client_ca_path: Option<&str>,
+    client_certs: ClientCerts,
 ) -> anyhow::Result<openssl::ssl::SslAcceptor> {
     use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
 
@@ -507,7 +612,11 @@ fn load_tls_acceptor(
 
     if let Some(ca_path) = client_ca_path {
         builder.set_ca_file(ca_path)?;
-        builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+        let mut mode = SslVerifyMode::PEER;
+        if client_certs == ClientCerts::Required {
+            mode |= SslVerifyMode::FAIL_IF_NO_PEER_CERT;
+        }
+        builder.set_verify(mode);
     }
 
     Ok(builder.build())
@@ -523,6 +632,7 @@ fn resolve_tls_acceptor(
     cli_key: Option<String>,
     cli_ca: Option<String>,
     creds_dir: Option<&std::path::Path>,
+    client_certs: ClientCerts,
 ) -> anyhow::Result<openssl::ssl::SslAcceptor> {
     let creds = creds_dir.map(varlink_http_bridge::sysconf::CredentialsLoader::from_dir);
     let cred = |name: &str| -> Option<String> {
@@ -534,15 +644,25 @@ fn resolve_tls_acceptor(
 
     let tls_cert = cli_cert.or_else(|| cred("cert"));
     let tls_key = cli_key.or_else(|| cred("key"));
-    let client_ca = cli_ca.or_else(|| cred("trust"));
+    let client_ca = match client_certs {
+        ClientCerts::Ignore => None,
+        _ => cli_ca.or_else(|| cred("trust")),
+    };
 
     match (tls_cert.as_deref(), tls_key.as_deref()) {
-        (Some(cert), Some(key)) => load_tls_acceptor(cert, key, client_ca.as_deref()),
+        (Some(cert), Some(key)) => load_tls_acceptor(cert, key, client_ca.as_deref(), client_certs),
         (None, None) => {
             // TLS is not optional, generate a self-signed cert.
             let dir = tls_cert::state_dir()?;
             let (cert_path, key_path) = tls_cert::load_or_generate(&dir)?;
             tls_cert::print_pin(&cert_path)?;
+            if client_certs != ClientCerts::Ignore {
+                warn!(
+                    "The server certificate is self-signed while mTLS is enabled. \
+                     Clients verifying it against your CA will refuse to connect. \
+                     Pass --cert=/--key= issued by that CA, or have clients pin the key above."
+                );
+            }
             load_tls_acceptor(
                 cert_path
                     .to_str()
@@ -551,6 +671,7 @@ fn resolve_tls_acceptor(
                     .to_str()
                     .expect("failed to convert key path to str"),
                 client_ca.as_deref(),
+                client_certs,
             )
         }
         _ => bail!("--cert and --key must be specified together"),
@@ -602,7 +723,7 @@ trait Authenticator: Send + Sync {
 /// Authenticator that accepts every request.
 ///
 /// Pushed explicitly when authentication is deliberately disabled
-/// (`--insecure`). Making this an explicit authenticator keeps the
+/// (`--auth=none`). Making this an explicit authenticator keeps the
 /// middleware fail-closed: an empty `authenticators` list always rejects,
 /// so no future code path can accidentally turn into open access by
 /// failing to push a real authenticator.
@@ -1102,24 +1223,15 @@ impl std::fmt::Display for Transport {
 }
 
 /// Create a [`Transport`] from a socket-activated file descriptor.
-fn listener_from_activated_fd(
-    fd: OwnedFd,
-    tls_acceptor: Option<openssl::ssl::SslAcceptor>,
-) -> anyhow::Result<(Transport, Option<openssl::ssl::SslAcceptor>)> {
+fn listener_from_activated_fd(fd: OwnedFd) -> anyhow::Result<Transport> {
     let addr = rustix::net::getsockname(fd.as_fd())?;
     match addr.address_family() {
-        rustix::net::AddressFamily::VSOCK => {
-            let listener = VsockListener::from(fd);
-            Ok((Transport::Vsock(listener), tls_acceptor))
-        }
+        rustix::net::AddressFamily::VSOCK => Ok(Transport::Vsock(VsockListener::from(fd))),
         rustix::net::AddressFamily::INET | rustix::net::AddressFamily::INET6 => {
             let std_listener = std::net::TcpListener::from(fd);
             // needed or tokio panics, see https://github.com/mitsuhiko/listenfd/pull/23
             std_listener.set_nonblocking(true)?;
-            Ok((
-                Transport::Tcp(TcpListener::from_std(std_listener)?),
-                tls_acceptor,
-            ))
+            Ok(Transport::Tcp(TcpListener::from_std(std_listener)?))
         }
         family => bail!("unsupported socket family from socket activation: {family:?}"),
     }
@@ -1275,21 +1387,37 @@ struct BridgeCli {
     key: Option<String>,
     trust: Option<String>,
     authorized_keys: Option<String>,
-    insecure: bool,
+    auth: Vec<AuthMechanism>,
 }
+
+/// Help entries that only exist in an `sshauth` build. Each carries its own
+/// leading newline so it vanishes cleanly when the feature is off.
+const HELP_IMPORT_SSH_USAGE: &str = if cfg!(feature = "sshauth") {
+    "\n       varlink-httpd import-ssh SOURCE [OUTPUT]"
+} else {
+    ""
+};
+const HELP_IMPORT_SSH_CMD: &str = if cfg!(feature = "sshauth") {
+    "\n  import-ssh SOURCE [OUTPUT]        download SSH authorized keys from a URL"
+} else {
+    ""
+};
+const HELP_AUTHORIZED_KEYS: &str = if cfg!(feature = "sshauth") {
+    "\n  --authorized-keys=PATH            authorized SSH public keys file"
+} else {
+    ""
+};
 
 fn print_help() {
     eprint!(
         "{}",
         indoc::formatdoc! {"
-        Usage: varlink-httpd [bridge] [OPTIONS] [VARLINK_SOCKETS_PATH]
-               varlink-httpd import-ssh SOURCE [OUTPUT]
+        Usage: varlink-httpd [bridge] [OPTIONS] [VARLINK_SOCKETS_PATH]{HELP_IMPORT_SSH_USAGE}
 
         A HTTP/WebSocket daemon for varlink sockets.
 
         Subcommands:
-          bridge (default)                  start the HTTP/WebSocket server
-          import-ssh SOURCE [OUTPUT]        download SSH authorized keys from a URL
+          bridge (default)                  start the HTTP/WebSocket server{HELP_IMPORT_SSH_CMD}
 
         Bridge options:
           VARLINK_SOCKETS_PATH              directory of sockets or a single socket
@@ -1301,12 +1429,14 @@ fn print_help() {
                                             (default: self-signed, generated
                                             and persisted on first start)
           --key=PATH                        TLS private key PEM file
-          --trust=PATH                      CA certificate PEM for client verification (mTLS)
-          --authorized-keys=PATH            authorized SSH public keys file
-          --insecure                        run over plain HTTP without any
-                                            authentication (DANGEROUS)
+          --trust=PATH                      CA certificate PEM for client verification (mTLS){HELP_AUTHORIZED_KEYS}
+          --auth=LIST                       required; comma-separated mechanisms
+                                            to enable: {auth}
+                                            (none insecurely serves plain HTTP, DANGEROUS)
           --help                            display this help and exit
-    "}
+    ",
+            auth = AuthMechanism::names(),
+        }
     );
 }
 
@@ -1335,7 +1465,7 @@ fn parse_cli() -> anyhow::Result<Command> {
     let mut key = None;
     let mut trust = None;
     let mut authorized_keys = None;
-    let mut insecure = false;
+    let mut auth = None;
     let mut got_positional = false;
 
     let mut parser = lexopt::Parser::from_env();
@@ -1346,7 +1476,7 @@ fn parse_cli() -> anyhow::Result<Command> {
             Long("key") => key = Some(parser.value()?.parse()?),
             Long("trust") => trust = Some(parser.value()?.parse()?),
             Long("authorized-keys") => authorized_keys = Some(parser.value()?.parse()?),
-            Long("insecure") => insecure = true,
+            Long("auth") => auth = Some(parse_auth(&parser.value()?.string()?)?),
             Long("help") => {
                 print_help();
                 std::process::exit(0);
@@ -1375,6 +1505,13 @@ fn parse_cli() -> anyhow::Result<Command> {
         .map(|s| s.parse())
         .collect::<Result<_, _>>()?;
 
+    let auth = auth.with_context(|| {
+        format!(
+            "--auth= is required, pick the mechanisms to enable ({})",
+            AuthMechanism::names()
+        )
+    })?;
+
     Ok(Command::Bridge(BridgeCli {
         binds,
         varlink_sockets_path,
@@ -1382,7 +1519,7 @@ fn parse_cli() -> anyhow::Result<Command> {
         key,
         trust,
         authorized_keys,
-        insecure,
+        auth,
     }))
 }
 
@@ -1414,37 +1551,29 @@ fn parse_import_ssh_args(parser: &mut lexopt::Parser) -> anyhow::Result<Command>
 /// `/etc/varlink-httpd` key discovery; only tests override it.
 #[cfg_attr(not(feature = "sshauth"), allow(unused_variables))]
 fn build_authenticators(
-    authorized_keys: Option<String>,
+    auth: &[AuthMechanism],
+    authorized_keys: Option<&str>,
     creds_dir: Option<&std::path::Path>,
     etc_root: &std::path::Path,
-    insecure: bool,
-    has_mtls: bool,
 ) -> anyhow::Result<Vec<Box<dyn Authenticator>>> {
     let mut authenticators: Vec<Box<dyn Authenticator>> = Vec::new();
-
-    // HTTP-level methods below become optional extras for mTLS clients
-    if has_mtls {
-        authenticators.push(Box::new(MtlsAuthenticator));
+    for mechanism in auth {
+        match mechanism {
+            AuthMechanism::Mtls => authenticators.push(Box::new(MtlsAuthenticator)),
+            #[cfg(feature = "sshauth")]
+            AuthMechanism::SshAuth => authenticators.push(Box::new(create_ssh_authenticator(
+                authorized_keys.map(String::from),
+                creds_dir,
+                etc_root,
+            )?)),
+            AuthMechanism::None => {
+                warn!("--auth=none, all routes are open without authentication");
+                authenticators.push(Box::new(AllowAllAuthenticator {
+                    reason: "--auth=none",
+                }));
+            }
+        }
     }
-
-    #[cfg(feature = "sshauth")]
-    {
-        let ssh_auth = create_ssh_authenticator(authorized_keys, creds_dir, etc_root)?;
-        authenticators.push(Box::new(ssh_auth));
-    }
-
-    if insecure {
-        authenticators.clear();
-        authenticators.push(Box::new(AllowAllAuthenticator {
-            reason: "--insecure",
-        }));
-        eprintln!("WARNING: running without authentication - all routes are open");
-    } else if authenticators.is_empty() {
-        bail!(
-            "no authentication configured: build with 'sshauth' feature, use --trust=, or --insecure"
-        );
-    }
-
     Ok(authenticators)
 }
 
@@ -1463,65 +1592,100 @@ async fn main() -> anyhow::Result<()> {
 
     let creds_dir = varlink_http_bridge::sysconf::CredentialsLoader::path_from_env();
 
-    // Resolve mTLS: remember if trust was provided before consuming the options
-    let has_mtls =
-        cli.trust.is_some() || creds_dir.as_ref().is_some_and(|d| d.join("trust").exists());
-
-    let tls_acceptor = if cli.insecure {
-        None
-    } else {
-        Some(resolve_tls_acceptor(
-            cli.cert,
-            cli.key,
-            cli.trust,
-            creds_dir.as_deref(),
-        )?)
-    };
-    let scheme = if tls_acceptor.is_some() {
-        "HTTPS"
-    } else {
-        "HTTP"
-    };
-
+    if cli.auth == [AuthMechanism::None] && (cli.cert.is_some() || cli.key.is_some()) {
+        bail!("--cert=/--key= can't be used with --auth=none, which serves plain HTTP");
+    }
+    if cli.trust.is_some() && !cli.auth.contains(&AuthMechanism::Mtls) {
+        bail!("--trust= is only used with --auth=mtls");
+    }
+    #[cfg(feature = "sshauth")]
+    if cli.authorized_keys.is_some() && !cli.auth.contains(&AuthMechanism::SshAuth) {
+        bail!("--authorized-keys= is only used with --auth=sshauth");
+    }
     #[cfg(not(feature = "sshauth"))]
     if cli.authorized_keys.is_some() {
         bail!("--authorized-keys= requires building with the 'sshauth' feature");
     }
+    let client_certs = ClientCerts::of(&cli.auth);
+    if client_certs != ClientCerts::Ignore
+        && cli.trust.is_none()
+        && !creds_dir.as_ref().is_some_and(|d| d.join("trust").exists())
+    {
+        bail!("--auth=mtls requires --trust= or a 'trust' credential");
+    }
+
+    // vsock is a point-to-point host/guest channel, so a generated certificate
+    // nobody can verify buys little there and would force a state directory on
+    // guests that need none. Use TLS on vsock when it was asked for, or when a
+    // mechanism needs the client certificates only TLS can carry.
+    let tls_configured = cli.cert.is_some()
+        || cli.key.is_some()
+        || creds_dir
+            .as_ref()
+            .is_some_and(|d| d.join("cert").exists() || d.join("key").exists());
+    let vsock_tls = tls_configured || client_certs != ClientCerts::Ignore;
 
     let authenticators = build_authenticators(
-        cli.authorized_keys,
+        &cli.auth,
+        cli.authorized_keys.as_deref(),
         creds_dir.as_deref(),
         std::path::Path::new("/"),
-        cli.insecure,
-        has_mtls,
     )?;
 
     let app = create_router(&cli.varlink_sockets_path, authenticators)?;
 
     // Socket activation: consume all activated fds, or fall back to explicit --bind
     // run with e.g. "systemd-socket-activate -l 127.0.0.1:1031 -- varlink-httpd"
-    let mut listeners: Vec<(Transport, Option<openssl::ssl::SslAcceptor>)> = Vec::new();
+    let mut transports: Vec<Transport> = Vec::new();
     let mut listenfd = ListenFd::from_env();
     for idx in 0..listenfd.len() {
         if let Some(raw_fd) = listenfd.take_raw_fd(idx)? {
             // SAFETY: listenfd.take_raw_fd() returns a valid, owned fd from socket activation
             let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-            listeners.push(listener_from_activated_fd(fd, tls_acceptor.clone())?);
+            transports.push(listener_from_activated_fd(fd)?);
         }
     }
 
-    if listeners.is_empty() {
+    if transports.is_empty() {
         // No socket activation: bind explicitly based on --bind (or default)
         for bind in cli.binds {
-            let listener = listener_from_bind_addr(bind).await?;
-            listeners.push((listener, tls_acceptor.clone()));
+            transports.push(listener_from_bind_addr(bind).await?);
         }
     } else {
         eprintln!("Varlink proxy started (socket-activated)");
     }
 
+    let uses_tls = |transport: &Transport| match transport {
+        _ if cli.auth == [AuthMechanism::None] => false,
+        Transport::Vsock(_) => vsock_tls,
+        Transport::Tcp(_) => true,
+    };
+
+    // Resolved only once a listener actually needs it, so a plain vsock setup
+    // never generates a certificate it would not present.
+    let tls_acceptor = if transports.iter().any(uses_tls) {
+        Some(resolve_tls_acceptor(
+            cli.cert,
+            cli.key,
+            cli.trust,
+            creds_dir.as_deref(),
+            client_certs,
+        )?)
+    } else {
+        None
+    };
+
+    let listeners: Vec<(Transport, Option<openssl::ssl::SslAcceptor>)> = transports
+        .into_iter()
+        .map(|transport| {
+            let tls = uses_tls(&transport).then(|| tls_acceptor.clone()).flatten();
+            (transport, tls)
+        })
+        .collect();
+
     let mut join_set = tokio::task::JoinSet::new();
     for (listener, tls) in listeners {
+        let scheme = if tls.is_some() { "HTTPS" } else { "HTTP" };
         eprintln!(
             "Forwarding {scheme} {listener} -> Varlink: {}",
             cli.varlink_sockets_path

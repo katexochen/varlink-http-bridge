@@ -224,6 +224,7 @@ mod tests {
             cert_path.to_str().unwrap(),
             key_path.to_str().unwrap(),
             None,
+            crate::ClientCerts::Ignore,
         )
         .expect("generated material must build an acceptor");
     }
