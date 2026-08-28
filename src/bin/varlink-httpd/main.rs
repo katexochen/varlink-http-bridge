@@ -1374,6 +1374,20 @@ fn parse_cli() -> anyhow::Result<Command> {
         .map(|s| s.parse())
         .collect::<Result<_, _>>()?;
 
+    // Under --insecure the TLS options are never read. Silently dropping
+    // --trust would turn a setup that asked for mTLS into an open one.
+    if insecure {
+        for (name, set) in [
+            ("--cert", cert.is_some()),
+            ("--key", key.is_some()),
+            ("--trust", trust.is_some()),
+        ] {
+            if set {
+                bail!("--insecure serves plain HTTP and can't be combined with {name}=");
+            }
+        }
+    }
+
     Ok(Command::Bridge(BridgeCli {
         binds,
         varlink_sockets_path,
