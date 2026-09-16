@@ -224,12 +224,12 @@ async fn test_integration_real_systemd_hostname_post() {
 
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
-async fn test_integration_real_systemd_socket_get() {
+async fn test_integration_real_systemd_service_get() {
     let server = run_test_server("/run/systemd").await;
     let client = Client::new();
     let res = client
         .get(format!(
-            "http://{}/sockets/io.systemd.Hostname",
+            "http://{}/services/io.systemd.Hostname",
             server.addr,
         ))
         .send()
@@ -242,18 +242,18 @@ async fn test_integration_real_systemd_socket_get() {
 
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
-async fn test_integration_real_systemd_sockets_get() {
+async fn test_integration_real_systemd_services_get() {
     let server = run_test_server("/run/systemd").await;
     let client = Client::new();
     let res = client
-        .get(format!("http://{}/sockets", server.addr))
+        .get(format!("http://{}/services", server.addr))
         .send()
         .await
         .expect("failed to get from test server");
     assert_eq!(res.status(), 200);
     let body: Value = res.json().await.expect("varlink body invalid");
     assert!(
-        body["sockets"]
+        body["services"]
             .as_array()
             .expect("sockets not an array")
             .contains(&json!("io.systemd.Hostname"))
@@ -262,12 +262,12 @@ async fn test_integration_real_systemd_sockets_get() {
 
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
-async fn test_integration_real_systemd_socket_interface_get() {
+async fn test_integration_real_systemd_service_interface_get() {
     let server = run_test_server("/run/systemd").await;
     let client = Client::new();
     let res = client
         .get(format!(
-            "http://{}/sockets/io.systemd.Hostname/io.systemd.Hostname",
+            "http://{}/services/io.systemd.Hostname/io.systemd.Hostname",
             server.addr,
         ))
         .send()
@@ -277,7 +277,7 @@ async fn test_integration_real_systemd_socket_interface_get() {
     let body: Value = res.json().await.expect("varlink body invalid");
     // the full list grows with systemd releases, Describe has always been there
     assert!(
-        body["method_names"]
+        body["methods"]
             .as_array()
             .is_some_and(|m| m.contains(&json!("Describe"))),
         "unexpected methods: {body}"
@@ -328,12 +328,12 @@ async fn test_integration_real_systemd_hostname_parallel() {
 
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
-async fn test_integration_real_systemd_socket_query_param() {
+async fn test_integration_real_systemd_service_query_param() {
     let server = run_test_server("/run/systemd").await;
     let client = Client::new();
     let res = client
         .post(format!(
-            "http://{}/call/org.varlink.service.GetInfo?socket=io.systemd.Hostname",
+            "http://{}/call/org.varlink.service.GetInfo?service=io.systemd.Hostname",
             server.addr,
         ))
         .json(&json!({}))
@@ -363,6 +363,27 @@ async fn test_error_bad_request_on_malformed_json() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// the spec asks bridges to accept an empty request body as `{}`
+#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[tokio::test]
+async fn test_call_accepts_empty_body() {
+    let server = run_test_server("/run/systemd").await;
+    let client = Client::new();
+
+    let res = client
+        .post(format!(
+            "http://{}/call/io.systemd.Hostname.Describe",
+            server.addr,
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.expect("varlink body invalid");
+    assert_eq!(body["KernelRelease"], expected_kernel_release());
 }
 
 #[test_with::path(/run/systemd)]
@@ -399,7 +420,7 @@ async fn test_error_404_for_missing_method() {
 
     let res = client
         .post(format!(
-            "http://{}/call/com.missing.Call?socket=io.systemd.Hostname",
+            "http://{}/call/com.missing.Call?service=io.systemd.Hostname",
             server.addr
         ))
         .json(&json!({}))
@@ -421,7 +442,7 @@ async fn test_error_bad_request_for_unclean_address() {
     let res = client
         .post(format!(
             // %2f is url encoding for "/" so socket param is ../io.systemd.Hostname
-            "http://{}/call/com.missing.Call?socket=..%2fio.systemd.Hostname",
+            "http://{}/call/com.missing.Call?service=..%2fio.systemd.Hostname",
             server.addr
         ))
         .json(&json!({}))
@@ -446,7 +467,7 @@ async fn test_error_bad_request_for_invalid_chars_in_address() {
     let res = client
         .post(format!(
             // %0A is \n
-            "http://{}/call/com.missing.Call?socket=io.systemd.Hostname%0Abad-msg",
+            "http://{}/call/com.missing.Call?service=io.systemd.Hostname%0Abad-msg",
             server.addr
         ))
         .json(&json!({}))
@@ -479,7 +500,7 @@ async fn test_error_bad_request_for_method_without_dots() {
     let body: Value = res.json().await.expect("error body invalid");
     assert_eq!(
         body["error"],
-        "cannot derive socket from method 'NoDots': no dots in name"
+        "cannot derive service from method 'NoDots': no dots in name"
     );
 }
 
@@ -656,7 +677,7 @@ async fn test_integration_openapi_paths_are_routable() {
 #[tokio::test]
 async fn test_ws_hostname_describe() {
     let server = run_test_server("/run/systemd").await;
-    let url = format!("ws://{}/ws/sockets/io.systemd.Hostname", server.addr);
+    let url = format!("ws://{}/ws/services/io.systemd.Hostname", server.addr);
     let (mut ws, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("WS connect failed");
@@ -722,7 +743,7 @@ fn run_stub_varlink_socket(keep_open: bool) -> StubVarlinkSocket {
 
 async fn connect_stub_ws(stub: &StubVarlinkSocket) -> (TestServer<std::net::SocketAddr>, WsStream) {
     let server = run_test_server(stub.path.to_str().expect("stub path not utf8")).await;
-    let url = format!("ws://{}/ws/sockets/io.test.Stub", server.addr);
+    let url = format!("ws://{}/ws/services/io.test.Stub", server.addr);
     let (ws, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("WS connect failed");
@@ -766,7 +787,7 @@ async fn test_ws_close_when_varlink_socket_closes() {
 #[tokio::test]
 async fn test_ws_userdb_get_user_record_more() {
     let server = run_test_server("/run/systemd/userdb").await;
-    let url = format!("ws://{}/ws/sockets/io.systemd.Multiplexer", server.addr);
+    let url = format!("ws://{}/ws/services/io.systemd.Multiplexer", server.addr);
     let (mut ws, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("WS connect failed");
@@ -904,7 +925,7 @@ async fn test_jsonseq_userdb_get_user_record_more() {
     let client = Client::new();
     let res = client
         .post(format!(
-            "http://{}/call/io.systemd.UserDatabase.GetUserRecord?socket=io.systemd.Multiplexer&more=true",
+            "http://{}/call/io.systemd.UserDatabase.GetUserRecord?service=io.systemd.Multiplexer&more=true",
             server.addr,
         ))
         .json(&json!({"service": "io.systemd.Multiplexer"}))
@@ -940,7 +961,7 @@ async fn test_jsonseq_userdb_get_user_record_more() {
 #[tokio::test]
 async fn test_varlinkctl_helper_hostname_describe() {
     let server = run_test_server("/run/systemd").await;
-    let bridge_url = format!("http://{}/ws/sockets/io.systemd.Hostname", server.addr);
+    let bridge_url = format!("http://{}/ws/services/io.systemd.Hostname", server.addr);
     let output = run_varlinkctl_call(
         &bridge_url,
         "io.systemd.Hostname.Describe",
@@ -962,7 +983,7 @@ async fn test_varlinkctl_helper_hostname_describe() {
 #[tokio::test]
 async fn test_varlinkctl_helper_userdb_get_user_record() {
     let server = run_test_server("/run/systemd/userdb").await;
-    let bridge_url = format!("http://{}/ws/sockets/io.systemd.Multiplexer", server.addr);
+    let bridge_url = format!("http://{}/ws/services/io.systemd.Multiplexer", server.addr);
     let output = run_varlinkctl_call(
         &bridge_url,
         "io.systemd.UserDatabase.GetUserRecord",
@@ -1460,7 +1481,7 @@ async fn test_varlinkctl_helper_mtls_hostname_describe() {
     std::fs::copy(&pki.ca_cert_path, tls_dir.join("server-ca-file")).unwrap();
 
     let bridge_url = format!(
-        "https://localhost:{}/ws/sockets/io.systemd.Hostname",
+        "https://localhost:{}/ws/services/io.systemd.Hostname",
         server.addr.port()
     );
 
@@ -1498,7 +1519,7 @@ async fn test_varlinkctl_helper_mtls_no_client_cert() {
     std::fs::copy(&pki.ca_cert_path, tls_dir.join("server-ca-file")).unwrap();
 
     let bridge_url = format!(
-        "https://localhost:{}/ws/sockets/io.systemd.Hostname",
+        "https://localhost:{}/ws/services/io.systemd.Hostname",
         server.addr.port()
     );
 
@@ -1726,7 +1747,7 @@ async fn test_varlinkctl_helper_vsock_hostname_describe() {
     }
 
     let server = run_test_vsock_server("/run/systemd");
-    let bridge_url = format!("vsock://1:{}/ws/sockets/io.systemd.Hostname", server.addr);
+    let bridge_url = format!("vsock://1:{}/ws/services/io.systemd.Hostname", server.addr);
     let output = run_varlinkctl_call(
         &bridge_url,
         "io.systemd.Hostname.Describe",
@@ -2175,7 +2196,7 @@ mod sshauth_tests {
         let cb = TlsChannelBinding::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
-            .action("path", "/sockets")
+            .action("path", "/services")
             .action("accept", "")
             .action("nonce", nonce)
             .action("tls-channel-binding", cb.as_str());
@@ -2188,7 +2209,7 @@ mod sshauth_tests {
         let result = check_request(
             &auth,
             "GET",
-            "/sockets",
+            "/services",
             Some(&header),
             Some(nonce),
             Some(&cb),
@@ -2210,7 +2231,7 @@ mod sshauth_tests {
         let cb = TlsChannelBinding::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
-            .action("path", "/sockets")
+            .action("path", "/services")
             .action("accept", "")
             .action("nonce", nonce)
             .action("tls-channel-binding", cb.as_str());
@@ -2220,7 +2241,7 @@ mod sshauth_tests {
         let result = check_request(
             &auth,
             "GET",
-            "/sockets",
+            "/services",
             Some(&header),
             Some(nonce),
             Some(&cb),
@@ -2244,7 +2265,7 @@ mod sshauth_tests {
 
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
-            .action("path", "/sockets")
+            .action("path", "/services")
             .action("accept", "")
             .action("nonce", nonce)
             .action("tls-channel-binding", cb.as_str());
@@ -2254,7 +2275,7 @@ mod sshauth_tests {
         check_request(
             &auth,
             "GET",
-            "/sockets",
+            "/services",
             Some(&header),
             Some(nonce),
             Some(&cb),
@@ -2271,7 +2292,7 @@ mod sshauth_tests {
         let sign = async |nonce: &str, accept: &str| {
             let mut tb = signer.sign_for();
             tb.action("method", "GET")
-                .action("path", "/sockets")
+                .action("path", "/services")
                 .action("accept", accept)
                 .action("nonce", nonce)
                 .action("tls-channel-binding", cb.as_str());
@@ -2286,7 +2307,7 @@ mod sshauth_tests {
             }
             auth.check_request(&AuthRequest {
                 method: "GET",
-                path: "/sockets",
+                path: "/services",
                 headers: &headers,
                 tls_channel_binding: Some(&cb),
             })
@@ -2319,7 +2340,7 @@ mod sshauth_tests {
         let nonce = "no-tls-binding-test-1234";
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
-            .action("path", "/sockets")
+            .action("path", "/services")
             .action("accept", "")
             .action("nonce", nonce)
             .action("tls-channel-binding", "");
@@ -2328,7 +2349,7 @@ mod sshauth_tests {
 
         // a request without a channel binding can only come in over plain
         // HTTP, which --auth=ssh refuses at startup: fail closed
-        let result = check_request(&auth, "GET", "/sockets", Some(&header), Some(nonce), None);
+        let result = check_request(&auth, "GET", "/services", Some(&header), Some(nonce), None);
         assert!(
             result
                 .unwrap_err()
@@ -2347,7 +2368,7 @@ mod sshauth_tests {
         let (auth, _) = make_test_ssh_auth();
         let app = make_auth_test_router(vec![Box::new(auth)]);
         let response = app
-            .oneshot(Request::get("/sockets").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2363,7 +2384,7 @@ mod sshauth_tests {
         let app = make_auth_test_router(vec![Box::new(auth)]);
         let response = app
             .oneshot(
-                Request::get("/sockets")
+                Request::get("/services")
                     .header("Authorization", "Bearer bogus-token")
                     .header(
                         varlink_http_bridge::sshauth_token::SSHAUTH_NONCE_HEADER,
@@ -2405,7 +2426,7 @@ mod sshauth_tests {
         ]);
         let response = app
             .oneshot(
-                Request::get("/sockets")
+                Request::get("/services")
                     .header("Authorization", "Bearer dummy")
                     .body(Body::empty())
                     .unwrap(),
@@ -2446,7 +2467,7 @@ mod sshauth_tests {
         // only allowed when an explicit AllowAllAuthenticator is pushed.
         let app = make_auth_test_router(Vec::new());
         let response = app
-            .oneshot(Request::get("/sockets").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2462,9 +2483,9 @@ mod sshauth_tests {
             reason: "test",
         })]);
         // Request has no Authorization header at all - must still be allowed
-        // through the auth middleware to the (empty) /sockets handler.
+        // through the auth middleware to the (empty) /services handler.
         let response = app
-            .oneshot(Request::get("/sockets").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/services").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -2480,7 +2501,7 @@ mod sshauth_tests {
 
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
-            .action("path", "/sockets")
+            .action("path", "/services")
             .action("accept", "")
             .action("nonce", nonce)
             .action("tls-channel-binding", cb.as_str());
@@ -2491,7 +2512,7 @@ mod sshauth_tests {
         check_request(
             &auth,
             "GET",
-            "/sockets",
+            "/services",
             Some(&header),
             Some(nonce),
             Some(&cb),
@@ -2502,7 +2523,7 @@ mod sshauth_tests {
         let result = check_request(
             &auth,
             "GET",
-            "/sockets",
+            "/services",
             Some(&header),
             Some(nonce),
             Some(&cb),
@@ -2524,13 +2545,13 @@ mod sshauth_tests {
 
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
-            .action("path", "/sockets")
+            .action("path", "/services")
             .action("accept", "");
         let token = tb.sign().await.unwrap();
         let header = format!("Bearer {}", token.encode());
 
         // Without a nonce, the request should be rejected
-        let result = check_request(&auth, "GET", "/sockets", Some(&header), None, None);
+        let result = check_request(&auth, "GET", "/services", Some(&header), None, None);
         assert!(result.is_err(), "request without nonce should be rejected");
         assert!(result.unwrap_err().to_string().contains("missing nonce"));
     }
@@ -2546,7 +2567,7 @@ mod sshauth_tests {
 
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
-            .action("path", "/sockets")
+            .action("path", "/services")
             .action("accept", "")
             .action("nonce", nonce)
             .action("tls-channel-binding", cb_signer);
@@ -2556,7 +2577,7 @@ mod sshauth_tests {
         let result = check_request(
             &auth,
             "GET",
-            "/sockets",
+            "/services",
             Some(&header),
             Some(nonce),
             Some(&cb_verifier),
@@ -2577,7 +2598,7 @@ mod sshauth_tests {
 
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
-            .action("path", "/sockets")
+            .action("path", "/services")
             .action("accept", "")
             .action("nonce", nonce)
             .action("tls-channel-binding", cb.as_str());
@@ -2587,7 +2608,7 @@ mod sshauth_tests {
         check_request(
             &auth,
             "GET",
-            "/sockets",
+            "/services",
             Some(&header),
             Some(nonce),
             Some(&cb),
@@ -2855,7 +2876,7 @@ mod sshauth_tests {
         std::fs::copy(&pki.ca_cert_path, tls_dir.join("server-ca-file")).unwrap();
 
         let bridge_url = format!(
-            "https://localhost:{}/ws/sockets/io.systemd.Hostname",
+            "https://localhost:{}/ws/services/io.systemd.Hostname",
             server.addr.port()
         );
 
@@ -3178,25 +3199,25 @@ fn test_idl_to_openapi_nullable() {
     );
 }
 
-// ?socket= belongs to the other /call route; on the explicit-socket route it
+// ?service= belongs to the other /call route; on the explicit-socket route it
 // is rejected rather than silently ignored, whatever it points at.
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
-async fn test_integration_call_socket_rejects_query_param() {
+async fn test_integration_call_service_rejects_query_param() {
     let server = run_test_server("/run/systemd").await;
     let client = Client::new();
 
     for socket in ["io.systemd.Login", "io.systemd.Hostname"] {
         let res = client
             .post(format!(
-                "http://{}/call/io.systemd.Hostname/io.systemd.Hostname.Describe?socket={socket}",
+                "http://{}/call/io.systemd.Hostname/io.systemd.Hostname.Describe?service={socket}",
                 server.addr,
             ))
             .json(&json!({}))
             .send()
             .await
             .expect("failed to post to test server");
-        assert_eq!(res.status(), 400, "?socket={socket} should be rejected");
+        assert_eq!(res.status(), 400, "?service={socket} should be rejected");
     }
 
     // without the query parameter the same call succeeds
@@ -3239,7 +3260,7 @@ async fn test_integration_call_oneway() {
     // bridge.
     let res = client
         .post(format!(
-            "http://{}/call/org.varlink.service.GetInfo?socket=io.systemd.Journal",
+            "http://{}/call/org.varlink.service.GetInfo?service=io.systemd.Journal",
             server.addr,
         ))
         .json(&json!({}))
