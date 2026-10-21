@@ -138,7 +138,7 @@ fail at startup on the node instead of at every caller's handshake.
 Registering is the WebSocket upgrade, with the node id in the URL:
 
 ```http
-GET /v1/tunnel?node_id=0f8cb1e4a6d24f7c9b3e5a1d7c0b4e26 HTTP/1.1
+GET /varlink-tunnel-v1?node_id=0f8cb1e4a6d24f7c9b3e5a1d7c0b4e26 HTTP/1.1
 Host: relay.example
 Upgrade: websocket
 ```
@@ -208,7 +208,7 @@ bridge that requires mTLS still registers and merely rejects the probe
 afterwards.
 
 ```
-node  -> GET /v1/tunnel?node_id=0f8cb1e4a6d24f7c9b3e5a1d7c0b4e26 HTTP/1.1
+node  -> GET /varlink-tunnel-v1?node_id=0f8cb1e4a6d24f7c9b3e5a1d7c0b4e26 HTTP/1.1
 relay -> 101 Switching Protocols, h2 preface ...
 relay -> opens one stream: TLS ClientHello, SNI relay.example
 node  -> checks SNI is the relay it dialed,
