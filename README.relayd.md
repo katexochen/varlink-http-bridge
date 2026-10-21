@@ -351,12 +351,11 @@ nothing requires it to.
 
 ## Shape
 
-The node side will be a new listener in `varlink-httpd`, not a separate
-process. `AsyncTlsListener<L>` is already generic over the inner
-listener, so `--relay` can compose as `AsyncTlsListener<DialOutListener>`
-and all existing auth paths apply untouched; the listener, its transport
-variant and its connect-info are milestone 2. With `--bind=none` no
-local TCP listener is exposed.
+The node side is a new listener in `varlink-httpd`, not a separate
+process. `AsyncTlsListener<L>` is generic over the inner listener, so
+`--relay` composes as `AsyncTlsListener<TunnelListener>` and all
+existing auth paths apply untouched. With `--bind=none` no local TCP
+listener is exposed.
 
 `varlink-relayd` is a separate binary with its own size gate.
 
@@ -365,12 +364,13 @@ local TCP listener is exposed.
 | # | Status | Step |
 |---|---|---|
 | 1 | [x] | `varlink-relayd`: `--bind-node`, `--bind-caller`, CONNECT demux, node registry, h2 PING heartbeat, TLS, `--insecure` guard rails, tested against a stub node |
-| 2 | [ ] | `varlink-httpd --relay <url>`: `DialOutListener` with its transport variant and connect-info, dial-out with redial and backoff, `--instance <label>`, `--bind=none`, the id as a SAN of the generated certificate, the size gate raised to 4608 KiB, end-to-end test against `varlink-relayd` |
+| 2 | [x] | `varlink-httpd --relay <url>`: `TunnelListener` with its transport variant and connect-info, dial-out with redial and backoff, `--instance <label>`, `--bind=none`, the size gate raised to 4608 KiB, end-to-end test against `varlink-relayd` |
 | 3a | [x] | fairness: a connection window sized for `MAX_TUNNEL_STREAMS`, a slot timeout and a `503` rather than one caller starving a tunnel |
 | 3b | [ ] | fairness: the relay takes a node slot before it opens a stream, so a caller that gives up waiting never reaches the node |
-| 4 | [ ] | operations: per-tunnel load tiers, one `debug` line per caller, `--auth=none` for a relay-only instance serving named sockets |
+| 4a | [x] | operations: one `debug` line per caller, `--auth=none` for a relay-only instance serving named sockets |
+| 4b | [ ] | operations: per-tunnel load tiers |
 | 5 | [ ] | `varlinkctl-http` as a caller through the relay (`VARLINK_RELAY_URL`) |
-| 6 | [ ] | verified node ids: the registration probe with the relay name as SNI and the node's check of it, the pin directory, the `4401` close and the node's backoff on it |
+| 6 | [ ] | verified node ids: the id as a SAN of the generated certificate, the registration probe with the relay name as SNI and the node's check of it, the pin directory, the `4401` close and the node's backoff on it |
 | 7 | [ ] | packaging: `varlink-relayd.service`/`.socket`, spec file |
 | 8 | [ ] | caller-side alias file |
 | 9 | [ ] | workload identity tokens: `--node-auth=jwt` verifying a WIT against a JWKS as the source of the key the probe checks, `--relay-token` on the bridge |
