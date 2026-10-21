@@ -39,7 +39,7 @@ with channel binding, bearer tokens) works unchanged, and the relay can
 neither read nor forge calls.
 
 ```console
-$ curl --proxytunnel -x http://relay:8444 \
+$ curl --proxytunnel -x http://relay:2063 \
     -H 'Authorization: Bearer ...' \
     --json '{}' https://<node_id>/call/io.systemd.Hostname.Describe
 ```
@@ -53,7 +53,7 @@ caller authentication on the relay (milestone 10) puts a token in
 `Proxy-Authorization`, which over plain `http://` is readable by anyone
 on the path. The caller listener then takes the same TLS wrapper the
 node listener has, without changing the protocol, and callers use an
-`https://` proxy (`curl -x https://relay:8444`); the relay refuses to
+`https://` proxy (`curl -x https://relay:2063`); the relay refuses to
 enable caller authentication on a plaintext caller listener. The same
 wrapper serves callers behind egress that only passes TLS.
 
@@ -364,9 +364,10 @@ local TCP listener is exposed.
 
 | # | Status | Step |
 |---|---|---|
-| 1 | [ ] | `varlink-relayd`: `--bind`, `--connect-bind`, CONNECT demux, node registry, h2 PING heartbeat, TLS, `--insecure` guard rails, tested against a stub node |
+| 1 | [x] | `varlink-relayd`: `--bind-node`, `--bind-caller`, CONNECT demux, node registry, h2 PING heartbeat, TLS, `--insecure` guard rails, tested against a stub node |
 | 2 | [ ] | `varlink-httpd --relay <url>`: `DialOutListener` with its transport variant and connect-info, dial-out with redial and backoff, `--instance <label>`, `--bind=none`, the id as a SAN of the generated certificate, the size gate raised to 4608 KiB, end-to-end test against `varlink-relayd` |
-| 3 | [ ] | fairness: a connection window sized for `MAX_TUNNEL_STREAMS`, a slot timeout and a `503` rather than one caller starving a tunnel |
+| 3a | [x] | fairness: a connection window sized for `MAX_TUNNEL_STREAMS`, a slot timeout and a `503` rather than one caller starving a tunnel |
+| 3b | [ ] | fairness: the relay takes a node slot before it opens a stream, so a caller that gives up waiting never reaches the node |
 | 4 | [ ] | operations: per-tunnel load tiers, one `debug` line per caller, `--auth=none` for a relay-only instance serving named sockets |
 | 5 | [ ] | `varlinkctl-http` as a caller through the relay (`VARLINK_RELAY_URL`) |
 | 6 | [ ] | verified node ids: the registration probe with the relay name as SNI and the node's check of it, the pin directory, the `4401` close and the node's backoff on it |
@@ -437,9 +438,9 @@ node share a single h2 connection, and h2's default is one 64KiB window
 for the whole connection, i.e. shared by all of its streams: a single
 caller whose local service hangs, or who stopped reading its socket,
 then holds the entire connection window and every other caller on that
-tunnel starves. Both tunnel ends will therefore size the connection
-window as `MAX_TUNNEL_STREAMS` (256) stream windows of 32KiB each, i.e.
-8MiB, and the node advertises that same stream limit, so no stream can
+tunnel starves. Both tunnel ends therefore size the connection
+window as `MAX_TUNNEL_STREAMS` (64) stream windows of 256KiB each, i.e.
+16MiB, and the node advertises that same stream limit, so no stream can
 hold more than its own share and a caller beyond the limit waits for a
 slot (and gets a `503` if none frees up in time) instead of slowing
 everybody down. The relay keeps that line itself, in front of h2: a
@@ -447,7 +448,7 @@ caller takes one of the node's slots before it opens a stream, so one
 that gives up waiting never reaches the node; left to h2's own queue, an
 abandoned request would still open and reset a stream on the node once a
 slot frees, one per waiter, ahead of the live callers. The window is a
-promise, not an allocation: an idle tunnel costs the same with 8MiB as
+promise, not an allocation: an idle tunnel costs the same with 16MiB as
 with h2's 64KiB default, and only a tunnel whose callers all wedge at
 once holds that much.
 
@@ -480,13 +481,13 @@ stop a flood: the slot timeout and `503` fail that node's callers fast
 and leave every other node's untouched, and the load tiers make the
 saturated node visible in the log.
 
-The 32KiB stream window is what bounds a single caller's throughput over
-a long fat pipe (window/RTT, so ~650KB/s at 50ms; the prototype measured
-0.60MB/s), ample for varlink call and reply, and the price for serving
-256 callers per node out of one connection window. Bulk data is what
-would suffer: 256KiB gets 4.89MB/s and 1MiB gets 17.65MB/s over the same
-50ms link, so carrying file transfers through the tunnel means
-revisiting the window.
+The 256KiB stream window is what bounds a single caller's throughput
+over a long fat pipe (window/RTT, so ~5MB/s at 50ms; the prototype
+measured 4.89MB/s, against 0.60MB/s with 32KiB), ample for varlink call
+and reply, and the price for serving 64 callers per node out of one
+connection window. Bulk data is what would suffer: 1MiB gets 17.65MB/s
+over the same 50ms link, so carrying file transfers through the tunnel
+means revisiting the window.
 
 ## Logging
 
