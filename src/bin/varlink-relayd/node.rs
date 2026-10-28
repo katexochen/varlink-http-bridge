@@ -74,7 +74,11 @@ async fn handle_node(stream: BoxedStream, nodes: &Nodes, peer: SocketAddr) -> Re
     // wait for the websocket upgrade, anything else is refused by tungstenite::accept
     let ws = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        tokio_tungstenite::accept_hdr_async(stream, on_ws_upgrade_request),
+        tokio_tungstenite::accept_hdr_async_with_config(
+            stream,
+            on_ws_upgrade_request,
+            Some(varlink_http_bridge::ws::config_for_h2()),
+        ),
     )
     .await
     .map_err(|_| anyhow!("node WebSocket upgrade timed out"))?

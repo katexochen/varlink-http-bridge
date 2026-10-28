@@ -189,9 +189,13 @@ async fn dial(
             Some(connector) => Box::new(tls_connect(connector, &target.host, tcp).await?),
             None => Box::new(tcp),
         };
-        let (ws, _response) = tokio_tungstenite::client_async(target.ws_url(node_id), stream)
-            .await
-            .context("tunnel WebSocket upgrade")?;
+        let (ws, _response) = tokio_tungstenite::client_async_with_config(
+            target.ws_url(node_id),
+            stream,
+            Some(varlink_http_bridge::ws::config_for_h2()),
+        )
+        .await
+        .context("tunnel WebSocket upgrade")?;
         // middleboxes reap long-lived connections without a close frame,
         // that is a routine end of a tunnel and not an error
         server_handshake(WsByteStream::new(ws).abrupt_close_as_eof())
