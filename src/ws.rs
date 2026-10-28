@@ -14,6 +14,19 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+
+/// tungstenite's 64MiB default lets any peer make us buffer that much.
+/// Each message is one h2 write, under 48KiB with h2's default 16KiB
+/// frames, so this leaves headroom.
+pub const MAX_MESSAGE: usize = 128 * 1024;
+
+#[must_use]
+pub fn config_for_h2() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE))
+}
 
 /// Binary payloads are the stream, a close frame is EOF and a text
 /// frame is an error, since only a confused peer or middlebox sends
@@ -192,29 +205,38 @@ pub(crate) fn drain(readbuf: &mut Bytes, buf: &mut ReadBuf<'_>) {
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    use super::WsByteStream;
+    use super::{WsByteStream, config_for_h2};
     use tokio::io::{DuplexStream, duplex};
     use tokio_tungstenite::WebSocketStream;
     use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
     pub(crate) async fn raw_pair() -> (WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>)
     {
+        raw_pair_with_config(None).await
+    }
+
+    pub(crate) async fn raw_pair_with_config(
+        config: Option<WebSocketConfig>,
+    ) -> (WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
         let (a, b) = duplex(4096);
         tokio::join!(
-            WebSocketStream::from_raw_socket(a, Role::Client, None),
-            WebSocketStream::from_raw_socket(b, Role::Server, None),
+            WebSocketStream::from_raw_socket(a, Role::Client, config),
+            WebSocketStream::from_raw_socket(b, Role::Server, config),
         )
     }
 
+    /// With the production limit, so that the h2 tests over it fail if
+    /// h2 ever writes more than [`super::MAX_MESSAGE`] at once.
     pub(crate) async fn ws_pair() -> (WsByteStream<DuplexStream>, WsByteStream<DuplexStream>) {
-        let (client, server) = raw_pair().await;
+        let (client, server) = raw_pair_with_config(Some(config_for_h2())).await;
         (WsByteStream::new(client), WsByteStream::new(server))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_helpers::{raw_pair, ws_pair};
+    use super::test_helpers::{raw_pair, raw_pair_with_config, ws_pair};
     use super::*;
     use futures_util::SinkExt as _;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -231,7 +253,9 @@ mod tests {
 
     #[tokio::test]
     async fn roundtrip_and_eof() {
-        let (mut client, mut server) = ws_pair().await;
+        // unlimited, a plain write_all is one message of any size
+        let (client, server) = raw_pair().await;
+        let (mut client, mut server) = (WsByteStream::new(client), WsByteStream::new(server));
 
         client.write_all(b"ping").await.unwrap();
         client.flush().await.unwrap();
@@ -256,6 +280,21 @@ mod tests {
         server.read_to_end(&mut got).await.unwrap();
         writer.await.unwrap();
         assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_message_is_refused() {
+        let (mut client, server) = raw_pair_with_config(Some(config_for_h2())).await;
+        let mut server = WsByteStream::new(server);
+        // the client's own limit only applies to what it reads, and its
+        // send never completes once the server stops reading
+        tokio::spawn(async move {
+            let _ = client
+                .send(Message::Binary(vec![0; MAX_MESSAGE + 1].into()))
+                .await;
+        });
+        let mut buf = [0u8; 1];
+        assert!(server.read(&mut buf).await.is_err());
     }
 
     #[tokio::test]
